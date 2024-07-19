@@ -212,8 +212,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
-
-
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
