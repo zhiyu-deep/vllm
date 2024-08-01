@@ -39,6 +39,9 @@ class CacheEngine:
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
         self.block_size = cache_config.block_size
+        # todo: 此处考虑pipeline parallel的场景.
+        #  cache_config.num_gpu_blocks规定最大blocks数目,
+        #  //= parallel_config.pipeline_parallel_size, 则规定了处理每个小batch的blocks数目.
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         if self.num_gpu_blocks:
             self.num_gpu_blocks //= parallel_config.pipeline_parallel_size
@@ -75,6 +78,7 @@ class CacheEngine:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+        # todo: 使用pin cpu memory, 用来支持async copy.
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_attention_layers):

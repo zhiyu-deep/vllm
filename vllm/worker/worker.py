@@ -108,6 +108,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
 
     def init_device(self) -> None:
+        # todo: 每个worker占据一张卡, 设置该卡运行环境.
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -221,6 +222,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
+        # todo: 当前worker需要处理pipeline parallel个small batch, 此处维护pipeline parallel个cache engine.
         self.cache_engine = [
             CacheEngine(self.cache_config, self.model_config,
                         self.parallel_config, self.device_config)
@@ -276,6 +278,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
+        # todo: 当前处理第virtual_engine个small batch, 维护其cache信息.
         virtual_engine = worker_input.virtual_engine
         # Issue cache operations.
         if (worker_input.blocks_to_swap_in is not None

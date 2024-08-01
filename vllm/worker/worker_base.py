@@ -169,7 +169,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     If custom control plane logic is needed to transfer metadata, or if the
     model runner cannot inherit from ModelRunnerBase, use WorkerBase instead.
     """
-    is_driver_worker: bool
+    is_driver_worker: bool          # todo: 在tp group中, 是否是driver worker.
     model_runner: ModelRunnerBase
 
     @property
@@ -218,6 +218,24 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
+        # todo: driver worker:
+        #  1. 解析得到worker_input, model_input, num_steps.
+        #  2. 在tp group内, 把dict传递给其他worker; 如果do_metadata_broadcast = false, 则不会发生传递.
+        #  , 单纯解析 input+推理.
+
+        # todo: worker:
+        #  1. 若存在worker, 则肯定为多worker场景, 所以需要传递dict, 解析得到worker_input, model_input, num_steps.
+
+        # todo: worker_input?
+
+        # todo: pp parallel:
+        #       t0 t1 t2 t3 t4 t5
+        #   p0   0  1  2  3
+        #   p1      0  1  2  3
+        #   p2         0  1  2  3
+        #   1. first rank: 在外部获取input, 推理结束把output传递给下一个rank.
+        #   2. last rank: 每次receive input, 推理结束, 直接返回output.
+        #   3. 中间rank: 每次receive input, 传递output.
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
