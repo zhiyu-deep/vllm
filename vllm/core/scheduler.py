@@ -415,8 +415,15 @@ class Scheduler:
             if num_running_tokens == 0:
                 break
 
+            # todo: running_queue是按照优先级排序的, 将最高优先级的seqGroup拿出来.
+            #   1. 不满足_can_append_slots:
+            #       1.1 running_queue不为空(即存在更低优先级的seqGroup), 则尝试把低优的seqGroup踢出.
+            #       1.2 running_queue为空, 则只能把该seqGroup本身踢出.
+            #       当running_queue最终为空, 则直接结束.
+            #   2. 通过一系列操作, 确定满足_can_append_slots, 则为该seqGroup进行_append_slots.
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
+                # todo: 该seqGroup为running seqGroup, budget中已经记录了该seqGroup的运行信息, 现在可能无法满足_can_append_slots, 所以先从budget中剔除.
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -1050,6 +1057,13 @@ class Scheduler:
         # over sequence groups with a single sequence.
         # TODO(woosuk): Support recomputation for sequence groups with multiple
         # sequences. This may require a more sophisticated CUDA kernel.
+
+        # todo:
+        #   很关键的一点, 怎么确定peempt类型, recompute(已经解码得到的整句话当做prompt)? swap(将整句话的运行信息swap到cpu)?
+        #   1. 手动指定preempt类型.
+        #   2. 自动判断:
+        #       2.1 seqs=1, 为recompute, 因为要求prompts=1, 所以seq=1, 可以成为prompt.
+        #       2.2 seqs较大, 多prompt场景比较复杂, 目前不支持, 只能swap.
         if preemption_mode is None:
             if seq_group.get_max_num_running_seqs() == 1:
                 preemption_mode = PreemptionMode.RECOMPUTE
@@ -1069,6 +1083,7 @@ class Scheduler:
     ) -> None:
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         assert len(seqs) == 1
+        # todo: 当作prompt, 从显存中释放整句话; 修改seqGroup的状态信息.
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
             self.free_seq(seq)
@@ -1102,6 +1117,7 @@ class Scheduler:
             raise RuntimeError(
                 "Aborted due to the lack of CPU swap space. Please increase "
                 "the swap space to avoid this error.")
+        # todo: 从显存中swap; 修改seqGroup的状态信息.
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
