@@ -479,6 +479,8 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
+
+        # todo: 并不代表当前running的seqs; 而是预计执行的最大seqs(由beamSearch等决定).
         if self.sampling_params.use_beam_search:
             # For beam search, maximally there will always be `best_of` beam
             # candidates running in the future.
