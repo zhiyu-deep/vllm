@@ -9,7 +9,7 @@ def create_output_by_sequence_group(
     """Helper method which transforms a 2d list organized by
     [step][sequence group] into [sequence group][step].
     """
-    output_by_sequence_group: List[List[SamplerOutput]] = [
+    output_by_sequence_group: List[List[SequenceGroupOutput]] = [
         [] for _ in range(num_seq_groups)
     ]
     for step in sampler_outputs:

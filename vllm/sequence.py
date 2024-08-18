@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
+# todo: 输出某个token的log信息.
 @dataclass
 class Logprob:
     """Infos for supporting OpenAI compatible logprobs and token ranks.
@@ -28,6 +29,10 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
+# todo:
+#  1. Dict[int, logProb]是词表log信息
+#  2. list则是一串token的log列表
+#  3. PromptLogprobs是关于prompt的token串, SampleLogProbs是关于decode的token串.
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
