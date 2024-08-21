@@ -57,6 +57,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
+        # todo: len(outputs) == step.
         assert len(outputs) == 1, ("Single step should only has 1 output.")
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs

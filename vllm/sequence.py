@@ -32,7 +32,7 @@ class Logprob:
 # todo:
 #  1. Dict[int, logProb]是词表log信息
 #  2. list则是一串token的log列表
-#  3. PromptLogprobs是关于prompt的token串, SampleLogProbs是关于decode的token串.
+#  3. PromptLogprobs是关于prompt的token串(每个token的prob信息), SampleLogProbs是关于decode的token串(每个token的prob信息).
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
