@@ -78,15 +78,29 @@ class VocabParallelEmbedding(torch.nn.Module):
             "parallel_dim": 0,
             "weight_loader": self.weight_loader
         })
+        # todo: 上面代码本质上就是
+        #  w[vocab size, embedding dim]--padding-->
+        #  wp[padded vocab size, embedding dim]--(partition)->
+        #  wpart[num_embeddings_per_partition, embedding dim],
+        #  tp中每个worker负责其中一个wpart.
 
+    # todo:
+    #  param, 即self.weight
+    #  loaded_weight, 即vocab embedding matrix[ori vocab size, embedding dim].
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         parallel_dim = param.parallel_dim
         assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
         loaded_weight = loaded_weight[self.vocab_start_index:self.
                                       vocab_end_index]
+        # 此处的目的, 对于最后一块wpart, 只拷贝ori vocab size部分内容.
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
 
+    # todo: input_可以理解为token ids.
     def forward(self, input_):
+        # todo: 此处得逻辑是, tp中每个worker处理完整得input, 但是对input中的内容根据vocab_start_index和vocab_end_index进行转换,
+        #   转换之后就可以从wpart矩阵中索引得到embedding内容;
+        #   tp中每个worker就会得到稀疏的embedding, 每个worker都编码了部分token id;
+        #   通过tp间的reduce得到完整的embedding矩阵.
         if self.tp_size > 1:
             # Build the mask.
             input_mask = ((input_ < self.vocab_start_index) |
@@ -114,6 +128,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         return s
 
 
+# todo: 此处主要复用了embedding中的weight切分逻辑.
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 
