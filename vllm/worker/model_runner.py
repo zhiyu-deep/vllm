@@ -617,8 +617,8 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, torch.Tensor]:
         if self.is_driver_worker:
-            prefill_reqs = []
-            decode_reqs = []
+            prefill_reqs = []  # SequenceGroupMetadata
+            decode_reqs = []   # SequenceGroupMetadata
             for seq_group_meta in seq_group_metadata_list:
                 if seq_group_meta.is_prompt:
                     prefill_reqs.append(seq_group_meta)
