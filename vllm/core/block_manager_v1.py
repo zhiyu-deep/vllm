@@ -589,6 +589,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_table = self.block_tables[seq.seq_id]
         if max_full_block == -1:
             return
+        # todo: prefix已经cache, 则退出(cache一遍).
         for i in reversed(range(max_full_block)):
             if block_table[i].computed:
                 break

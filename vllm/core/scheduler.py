@@ -948,6 +948,7 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
+            # todo: 进行本轮的prefix share统计.
             common_computed_block_nums = (
                 self.block_manager.get_common_computed_block_ids(
                     seq_group.get_seqs(status=SequenceStatus.RUNNING)))
@@ -989,10 +990,11 @@ class Scheduler:
             )
             seq_group_metadata_list.append(seq_group_metadata)
 
-        # Now that the batch has been created, we can assume all blocks in the
-        # batch will have been computed before the next scheduling invocation.
-        # This is because the engine assumes that a failure in model execution
-        # will crash the vLLM instance / will not retry.
+        # todo: 假设已经推理完毕, 更新prefix share信息.
+            # Now that the batch has been created, we can assume all blocks in the
+            # batch will have been computed before the next scheduling invocation.
+            # This is because the engine assumes that a failure in model execution
+            # will crash the vLLM instance / will not retry.
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
