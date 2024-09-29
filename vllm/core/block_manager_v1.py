@@ -662,6 +662,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def compute_full_blocks_in_seq(self, seq: Sequence):
         if seq.seq_id not in self.block_tables:
             return
+        # todo: 此处 -1 是为了转为index(0开始).
         max_full_block = seq.get_len() // self.block_size - 1
         block_table = self.block_tables[seq.seq_id]
         if max_full_block == -1:
