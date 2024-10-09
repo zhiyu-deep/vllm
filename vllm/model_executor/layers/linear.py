@@ -41,6 +41,17 @@ def adjust_bitsandbytes_shard(param: Parameter,
     return quantized_size, quantized_offset
 
 
+# todo: 应用于linear weight, linear weight[input size, output size], 完成linear计算, output = X * A.
+#  create_weights:
+#    1. input_size_per_partition: 表示在input size维度上, 每个rank处理的大小, scalar, 值相同.
+#    2. output_partition_sizes: list, 表示需要循环多次进行X * A计算, 其中每个值表示每个rank处理的大小;
+#           for s in output_partition_sizes:
+#               X * A
+#    3. extra_weight_attrs: 为weight矩阵绑定额外的attributes.
+#       3.1 每个具体的layer都会定制weight初始化的逻辑(是一个function), function会被绑定到weight attribute, 表示如何初始化weight.
+#    4. 功能: 4.1 基于weight的描述, 创建empty weight矩阵, 4.2 将weight矩阵绑定到layer上, 指定weight名和weight矩阵.
+#  apply:
+#    1. 基于weight, 在layer中完成矩阵计算.
 class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
 
@@ -75,6 +86,7 @@ class LinearMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
+# todo: weight原地不动版本.
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization.
 
@@ -95,6 +107,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                                        input_size_per_partition,
                                        dtype=params_dtype),
                            requires_grad=False)
+        # todo: 用来标注weight中的input和output dim.
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
@@ -140,6 +153,7 @@ class LinearBase(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
+
         if quant_config is None:
             self.quant_method: Optional[
                 QuantizeMethodBase] = UnquantizedLinearMethod()
@@ -591,6 +605,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 ("v", (self.total_num_heads + self.total_num_kv_heads) *
                  self.head_size, self.total_num_kv_heads * self.head_size),
             ]
+
+            # todo: pack elements to entire int.
             packed_dim = getattr(param, "packed_dim", None)
             for shard_id, shard_offset, shard_size in shard_offsets:
                 # Special case for Quantized Weights.
@@ -768,6 +784,7 @@ class RowParallelLinear(LinearBase):
         fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
                                            None)
 
+        # todo: input_dim 参数控制split维度.
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
@@ -807,6 +824,7 @@ class RowParallelLinear(LinearBase):
         else:
             output_ = output_parallel
 
+        # todo: bias部分不会parallel, 会在output(1. no need to reduce, 2. after reduce)的基础上进行bias计算.
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_
             output_bias = None

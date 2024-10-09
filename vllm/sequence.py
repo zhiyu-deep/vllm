@@ -32,6 +32,7 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
+# note(jiang): list是句子维度.
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
@@ -157,6 +158,7 @@ class SequenceData:
         else:
             return (self._prompt_token_ids_tuple[:num_tokens], None)
 
+    # todo: 下面几个函数, 应该在seq处于prefill状态下调用.
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
         return self._num_computed_tokens
@@ -226,6 +228,7 @@ class Sequence:
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
+        # todo: input info.
         self.seq_id = seq_id
         self.inputs = inputs
         self.block_size = block_size
@@ -438,6 +441,7 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
+
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.encoder_seq = encoder_seq
@@ -506,6 +510,7 @@ class SequenceGroup:
             # candidates running in the future.
             return self.sampling_params.best_of
         else:
+            # todo: 此处主要是区分prefill和decode的场景: 1. prefill只有1, 2. decode, 总是有topk个句子.
             if (self.sampling_params
                     and self.sampling_params.best_of > self.num_seqs()):
                 # At prompt stage, the sequence group is not yet filled up
