@@ -329,6 +329,9 @@ class ModelRunner:
                                     and self.sliding_window is None
                                     and is_prompt)
 
+                # todo: seqLen和contextLen受限于slide window的情况:
+                #   1. slide window仅用于decode.
+                #   2. position相关信息, 需要使用完整的contextLen和seqLen.
                 # These are seq_len/context_len capped to the sliding window.
                 # They are passed to decode kernel.
                 # We still need original seq_len/context_len to compute slot
@@ -668,6 +671,7 @@ class ModelRunner:
                 num_decode_tokens,
                 num_prefills,
             ) = self._prepare_model_input(seq_group_metadata_list)
+
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
