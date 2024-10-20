@@ -214,6 +214,7 @@ def _prepare_seq_groups(
             assert num_prefill_sample == 1
             assert query_lens is not None and seq_lens is not None
             query_len, seq_len = query_lens[i], seq_lens[i]
+            # todo: query部分分为两部分: 1. logProb部分, query - 1(即最后1个token不需要), 2. sample部分, 1(即最后一个token进行sample).
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
             prompt_logprob_len = (query_len - num_prefill_sample
@@ -222,6 +223,7 @@ def _prepare_seq_groups(
         else:
             # Decode
             prompt_logprob_len = 0
+            # todo: sample len代表需要采样的tokens数.
             sample_len = len(seq_ids) if do_sample else 0
 
         # Update indices to select from the model output.

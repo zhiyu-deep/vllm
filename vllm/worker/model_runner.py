@@ -283,6 +283,7 @@ class ModelRunner:
         if len(seq_group_metadata_list) == 0:
             return ModelInput.empty(self.device)
 
+        # todo: only in decode.
         if self.sliding_window is not None:
             sliding_window_blocks = (self.sliding_window + self.block_size -
                                      1) // self.block_size
@@ -656,6 +657,8 @@ class ModelRunner:
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
+
+            # todo: 从driver的角度, 得到: 1. inputs, 2. attentionMeta, 3. sampleMeta.
             # Prepare input tensors.
             (
                 input_tokens,
@@ -671,11 +674,11 @@ class ModelRunner:
                 num_decode_tokens,
                 num_prefills,
             ) = self._prepare_model_input(seq_group_metadata_list)
-
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
 
+            # todo: dict整合所有数据进行交互.
             metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
@@ -693,6 +696,7 @@ class ModelRunner:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
+            # todo: 非driver的角度, 获取dict, 从dict中获取: 1. inputs, 2. attentionMeta, 3. sampleMeta(非driver只关注selected_token_indices)
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")

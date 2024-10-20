@@ -67,6 +67,9 @@ class Sampler(nn.Module):
          do_min_p) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
+        # todo:
+        #   1. prompt_tokens: [tokens, maxRelateTokens].
+        #   2. output_tokens: [tokens, maxRelateTokens].
         # Apply presence and frequency penalties.
         if do_penalties:
             logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
@@ -138,6 +141,8 @@ def _get_bin_counts_and_mask(
     vocab_size: int,
     num_seqs: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    # todo: bit count理解为[num seqs token, vocab tokens], 现在要统计对于每个seq token, 相关的vocab tokens的个数;
+    #   对应的vocab tokens信息来自于tokens矩阵[num seq tokens, vocab token index].
     # Compute the bin counts for the tokens.
     # vocab_size + 1 for padding.
     bin_counts = torch.zeros((num_seqs, vocab_size + 1),
@@ -197,6 +202,9 @@ def _apply_min_tokens_penalty(
     return logits
 
 
+# todo:
+#   1. prompt_tokens: [num_seqs, maxRelateTokens].
+#   2. output_tokens: [num_seqs, maxRelateTokens].
 def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                      output_tokens_tensor: torch.Tensor,
                      presence_penalties: torch.Tensor,
