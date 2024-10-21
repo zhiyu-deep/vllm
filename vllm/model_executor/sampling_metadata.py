@@ -170,12 +170,14 @@ def _prepare_seq_groups(
     """
     # Batched sequence groups for the current model forward stsep.
     seq_groups: List[SequenceGroupToSample] = []
+    # todo: 用来从所有model output token logits中索引得到 sample/compute token logits.
     # A list of token indices to sample/compute logprob. It is used to
     # prune the outcome logits from the model for the performance.
     selected_token_indices: List[int] = []
     # Used for selected_token_indices.
     model_output_idx = 0
 
+    # todo: 针对某个sample token, type->[(在sample/compute token logits中索引, 在sample token logits中索引)...]
     # Sampling type -> (
     # indices to sample/prompt logprob within pruned output logits,
     # indices to sample within pruned logits)
@@ -197,9 +199,11 @@ def _prepare_seq_groups(
         sampling_params = seq_group_metadata.sampling_params
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
+        # todo: 一个group只有1个seq len和query len, 即prompt的时候; 在decode的时候, 有很多句话, 不再维护seq_len和query_len的信息.
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
+        # todo: group中compute tokens, sample tokens在total sample/compute token中的索引.
         prompt_logprob_indices: List[int] = []
         sample_indices: List[int] = []
         do_sample = seq_group_metadata.do_sample
@@ -213,8 +217,14 @@ def _prepare_seq_groups(
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
             assert query_lens is not None and seq_lens is not None
+            # todo: prefill groups, decode groups从前往后排列, 当前是prefill, 则之前全是prefill, 每个prefill group中有且仅有一个句子.
             query_len, seq_len = query_lens[i], seq_lens[i]
-            # todo: query部分分为两部分: 1. logProb部分, query - 1(即最后1个token不需要), 2. sample部分, 1(即最后一个token进行sample).
+            # todo:
+            #  如果进行sample, 则prefill query分为两部分:
+            #   1. logProb部分, query - 1(即最后1个token不需要)
+            #   2. sample部分, 1(即最后一个token进行sample).
+            #  如果不进行sample, 则prefill query全都是logProb部分.
+            #  总之: prefill中, prompt_logprob_len + sample_len = query_len
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
             prompt_logprob_len = (query_len - num_prefill_sample
@@ -223,7 +233,7 @@ def _prepare_seq_groups(
         else:
             # Decode
             prompt_logprob_len = 0
-            # todo: sample len代表需要采样的tokens数.
+            # todo: decode中每个句子需要计算1个token, 并且从该token中进行sample.
             sample_len = len(seq_ids) if do_sample else 0
 
         # Update indices to select from the model output.
@@ -234,7 +244,6 @@ def _prepare_seq_groups(
         hidden_states = model(...)
         logits = hidden_states[selected_token_indices]
         """
-
         if sampling_params.prompt_logprobs is not None:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + prompt_logprob_len))
@@ -243,6 +252,8 @@ def _prepare_seq_groups(
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + sample_len))
         model_output_idx += sample_len
+        # todo: 疑问？对于decode, 如果是not do_sample, prompt_logprob_len和sample_len值均为0, model_output_idx不往前移动了?
+        #   decode阶段, 都先当作do_sample来理解!!!!!
 
         # We now find indices for logprob computation and sampling.
         """
@@ -256,7 +267,6 @@ def _prepare_seq_groups(
            # prompt_logprob_indices to find prompt logprob indices.
            # sample_indices to find sample indices.
         """
-
         if sampling_params.prompt_logprobs is not None:
             prompt_logprob_indices.extend(
                 range(logit_idx, logit_idx + prompt_logprob_len))
