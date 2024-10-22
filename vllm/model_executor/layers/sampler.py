@@ -229,9 +229,9 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 
 
 def _apply_top_k_top_p(
-    logits: torch.Tensor,
-    p: torch.Tensor,
-    k: torch.Tensor,
+    logits: torch.Tensor,  # [tokens, vocab size]
+    p: torch.Tensor,       # [tokens]
+    k: torch.Tensor,       # [tokens]
 ) -> torch.Tensor:
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
@@ -261,8 +261,8 @@ def _apply_top_k_top_p(
 
 
 def _apply_min_p(
-    logits: torch.Tensor,
-    min_p: torch.Tensor,
+    logits: torch.Tensor,  # [tokens, vocab size]
+    min_p: torch.Tensor,   # [tokens]
 ) -> torch.Tensor:
     """
     Adapted from
@@ -278,8 +278,8 @@ def _apply_min_p(
 
 
 def _greedy_sample(
-    selected_seq_groups: List[SequenceGroupToSample],
-    samples: torch.Tensor,
+    selected_seq_groups: List[SequenceGroupToSample],  # note(jiang): 使用greedy进行解码的groups.
+    samples: torch.Tensor,                             # note(jiang): [need sample tokens], refer to max logProb token idx in (need sample token)'s distribution.
 ) -> SampleResultType:
     """Run greedy sampling on a given samples.
 
@@ -294,7 +294,7 @@ def _greedy_sample(
         seq_group has do_sample=False, tuple contains ([], [])
     """
     samples = samples.tolist()
-    sample_idx = 0
+    sample_idx = 0  # note(jiang): 因为need sample tokens是batch到一起的, 表示当前处理第几个need sample token.
     results: SampleResultType = []
     for seq_group in selected_seq_groups:
         if not seq_group.do_sample:
@@ -306,8 +306,12 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
+
+        # note(jiang): 得到第sample_idx个need sample token, 对应的解码结果(output token idx).
         next_token_ids = [samples[sample_idx]]
         results.append((next_token_ids, parent_ids))
+
+        # note(jiang): 每次解码num_parent_seqs个句子.
         sample_idx += num_parent_seqs
     return results
 
@@ -467,12 +471,12 @@ def _sample_with_torch(
     categorized_seq_group_ids: Dict[SamplingType,
                                     List[int]] = {t: []
                                                   for t in SamplingType}
-    categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params
         sampling_type = sampling_params.sampling_type
         categorized_seq_group_ids[sampling_type].append(i)
 
+    # note(jiang): batch group Idx -> ([sample output token idxs], [parent seq ids]).
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata = {}
     multinomial_samples = {}
@@ -485,6 +489,8 @@ def _sample_with_torch(
                                                device=logprobs.device)
     else:
         sampled_token_ids_tensor = None
+
+    categorized_sample_indices = sampling_metadata.categorized_sample_indices
 
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
@@ -499,6 +505,7 @@ def _sample_with_torch(
         sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.GREEDY:
+            # note(jiang): [need sample tokens], refer to max logProb token idx in (need sample token)'s distribution.
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
 
