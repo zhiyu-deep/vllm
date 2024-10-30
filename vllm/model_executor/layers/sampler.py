@@ -14,7 +14,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceOutput)
 
-# (num_token_ids, num_parent_ids) per sequence group.
+# (num_token_ids, num_parent_ids) per sequence group. if skip sample, refers to ([], []).
 SampleResultType = List[Tuple[List[int], List[int]]]
 
 
@@ -54,7 +54,7 @@ class Sampler(nn.Module):
     ) -> Optional[SamplerOutput]:
         """
         Args:
-            logits: (num_tokens, vocab_size).
+            logits: (num_tokens, vocab_size).  已经是prune之后的tokens, 里面仅包括sample和prob tokens.
             sampling_metadata: Metadata for sampling.
         """
         assert logits is not None
@@ -682,6 +682,8 @@ def _sample(
 
 def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     """
+    len(x) = len(indices), value in indices refer to index in each row x.
+
     This function calculates the ranks of the chosen tokens in a logprob tensor.
 
     Args:
@@ -779,9 +781,13 @@ def _get_logprobs(
         empty_prompt_logprob: Optional[PromptLogprobs] = None
         return [empty_prompt_logprob], [empty_sampled_logprob]
 
+    # todo: 对于logProb矩阵[tokens, vocabSize], 现在要查找k个token的logProb信息.
+    #   1. query_indices[k]: 表示在logProb 0维的index信息. (注意: 在beam search场景下, query_indices中的值可能重复!!!!!!!!)
+    #   2. next_token_ids[k]: 表示在logProb中每一行的目标token id(是index?).
+    #   3. selected_logprobs[k]: 使用query_indices和next_token_ids索引得到的logProb信息.
+    #   4. rank[k]: 考虑vocab padding的情况下? token id在该行中的rank信息?
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_ids_gpu = torch.tensor(next_token_ids, device=logprobs.device)
-
     # (num_selected_query_tokens, num_logprobs). Note that query_indices can
     # contain duplicates if beam search is enabled.
     selected_logprobs = logprobs[[
@@ -1079,7 +1085,7 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     seq_data = seq_group.seq_data[seq_ids[0]]
     computed_len = seq_data.get_num_computed_tokens()
     prompt_tokens = seq_data.prompt_token_ids
-    # +1 because we are looking for a next prompt token.
+    # +1 because we are looking for a next prompt token. (送进来[k, k+n]的query tokens, 计算[k + 1, k + n + 1]的token在输出矩阵中的概率信息)
     next_token_index_start = computed_len + 1
     next_token_index_end = min(computed_len + query_len + 1,
                                len(prompt_tokens))

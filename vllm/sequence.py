@@ -31,8 +31,7 @@ class Logprob:
     rank: Optional[int] = None
     decoded_token: Optional[str] = None
 
-
-# note(jiang): list是句子维度.
+# note(jiang): list是seqGroup维度.
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
