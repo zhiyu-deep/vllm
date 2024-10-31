@@ -31,11 +31,14 @@ class Logprob:
     rank: Optional[int] = None
     decoded_token: Optional[str] = None
 
-# note(jiang): list是seqGroup维度.
+
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 # {token_id -> logprob} for each sequence group.
+# todo:
+#  1. list可以理解为seqGroup中的多个句子, 并且是在解码后得到, 下一个step的所有句子.
+#  2. dict中包含了sample token及其备选sample tokens(来自同一个parent seq).
 SampleLogprobs = List[Dict[int, Logprob]]
 
 

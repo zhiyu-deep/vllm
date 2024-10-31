@@ -476,7 +476,7 @@ def _sample_with_torch(
         sampling_type = sampling_params.sampling_type
         categorized_seq_group_ids[sampling_type].append(i)
 
-    # note(jiang): batch group Idx -> ([sample output token idxs], [parent seq ids]).
+    # note(jiang): group Idx -> ([sample output token idxs], [parent seq ids]).
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata = {}
     multinomial_samples = {}
@@ -682,7 +682,8 @@ def _sample(
 
 def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     """
-    len(x) = len(indices), value in indices refer to index in each row x.
+    len(x) = len(indices), len(x)表示logits数目, x为logProb矩阵, indices表示sample token idx;
+    此函数就是为了计算在logProb矩阵中, sample token idx在该行的logProb大小排序(rank).
 
     This function calculates the ranks of the chosen tokens in a logprob tensor.
 
@@ -754,6 +755,7 @@ def _get_logprobs(
                 and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
+            # todo: prompt中, next tokens idx即为sample token idx.
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prompt_logprob_indices)
             next_token_ids.extend(next_prompt_tokens)
@@ -761,6 +763,9 @@ def _get_logprobs(
         # Update indices and next tokenes for sample logprob.
         if seq_group.do_sample:
             token_ids, parent_seq_ids = sample_result
+            # todo:
+            #   1. decode中sample_indices[0]明确了在logits矩阵中的起始位置.
+            #   2. 当为beam search时, sample token idx不一定来自每一行logits, 所以使用parent seq idx(0->k)来寻找.
             # NOTE: We cannot directly use sample_indices because
             # sample_indices only contain parent seq_ids of a previous step.
             # The current step may have different number of seq_ids, and
@@ -781,11 +786,11 @@ def _get_logprobs(
         empty_prompt_logprob: Optional[PromptLogprobs] = None
         return [empty_prompt_logprob], [empty_sampled_logprob]
 
-    # todo: 对于logProb矩阵[tokens, vocabSize], 现在要查找k个token的logProb信息.
-    #   1. query_indices[k]: 表示在logProb 0维的index信息. (注意: 在beam search场景下, query_indices中的值可能重复!!!!!!!!)
-    #   2. next_token_ids[k]: 表示在logProb中每一行的目标token id(是index?).
-    #   3. selected_logprobs[k]: 使用query_indices和next_token_ids索引得到的logProb信息.
-    #   4. rank[k]: 考虑vocab padding的情况下? token id在该行中的rank信息?
+    # todo: 对于logits矩阵[compute tokens, vocabSize], 现在要查找k个sample token的logProb信息.
+    #   1. query_indices[k]: k个sample token对应compute token在logits矩阵中index信息.
+    #   2. next_token_ids[k]: k个sample token在compute token logit行中的idx.
+    #   3. selected_logprobs[k]: 使用query_indices和next_token_ids索引得到的sample token的logProb信息.
+    #   4. rank[k]: sample token的logProb在compute token logit行中的排序信息.
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_ids_gpu = torch.tensor(next_token_ids, device=logprobs.device)
     # (num_selected_query_tokens, num_logprobs). Note that query_indices can
@@ -818,8 +823,8 @@ def _get_logprobs(
     # Find prompt/sample logprobs.
     prompt_logprobs_per_seq_group: List[Optional[PromptLogprobs]] = []
     sample_logprobs_per_seq_group: List[SampleLogprobs] = []
-    top_logprob_idx = 0
-    selected_logprobs_idx = 0
+    top_logprob_idx = 0        # todo: 在logit矩阵中, 当前compute token的索引.
+    selected_logprobs_idx = 0  # todo: sample tokens排成列表, 表示当前sample token在列表中index.
 
     for seq_group, sample_result in zip(sampling_metadata.seq_groups,
                                         sample_results):
@@ -908,7 +913,12 @@ def _get_sampled_logprob_if_needed(
     selected_logprobs_idx: int,
     top_logprob_idx: int,
 ):
-    """Compute the sample logprob if needed."""
+    """Compute the sample logprob if needed.
+
+    1. 收集sample token的logProb.
+    2. 当sample param中指定需要返回compute token的多个备选sample token, 则一并收集该compute token(parent seq)下的多个sample tokens.
+
+    """
     seq_ids = seq_group.seq_ids
     num_logprobs = seq_group.sampling_params.logprobs or 0
     sampled_logprobs: SampleLogprobs = []
@@ -931,6 +941,7 @@ def _get_sampled_logprob_if_needed(
             }
             # Get top K logprobs.
             if num_logprobs > 0:
+                # todo: 候选sample token和主选sample token来自一个parent.
                 top_ids = top_token_ids[top_logprob_idx +
                                         parent_id, :num_logprobs].tolist()
                 top_probs = top_logprobs[top_logprob_idx +
@@ -959,6 +970,9 @@ def _get_sampled_logprob_if_needed(
         selected_logprobs_idx += len(next_token_ids)
         # Iterate to the next sequence group in a batch.
         top_logprob_idx += len(seq_ids)
+    # todo: sampled_logprobs: [{token idx: LogProb}].
+    #  1. list可以理解为seqGroup中的多个句子, 并且是在解码后得到, 下一个step的所有句子.
+    #  2. dict中包含了sample token及其备选sample tokens(来自同一个parent seq).
     return sampled_logprobs, top_logprob_idx, selected_logprobs_idx
 
 
