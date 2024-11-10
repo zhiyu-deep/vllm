@@ -36,9 +36,9 @@ class Logprob:
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 # {token_id -> logprob} for each sequence group.
-# todo:
-#  1. list可以理解为seqGroup中的多个句子, 并且是在解码后得到, 下一个step的所有句子.
-#  2. dict中包含了sample token及其备选sample tokens(来自同一个parent seq).
+# todo: 针对1个seq group:
+#  1. list表示在解码后得到, 下一个step的所有token.
+#  2. dict中包含了sample token及其备选k-1个sample tokens(来自同一个parent seq, 有时候需要返回k个最佳token).
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
@@ -129,6 +129,7 @@ class SequenceData:
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
+        # todo: chunk prefill下, prompt token不一定完全计算.
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
@@ -238,14 +239,15 @@ class Sequence:
         self.lora_request = lora_request
 
         self.data = SequenceData(self.prompt_token_ids)
-        self.output_logprobs: SampleLogprobs = []
+        self.output_logprobs: list[Dict[int, Logprob]] = []  # todo: list表示当前句子生成的token列表, Dict[int, Logprob]表示当前token的所有候选tokens.
         self.output_text = ""
+
+        self.status = SequenceStatus.WAITING
+        self.stop_reason: Union[int, str, None] = None
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(self.prompt_token_ids)
-        self.status = SequenceStatus.WAITING
-        self.stop_reason: Union[int, str, None] = None
 
         # Used for incremental detokenization
         self.prefix_offset = 0
@@ -507,12 +509,14 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
+        # todo: 像是预测, 接下来计算过程, 最多有几个句子运行.
         if self.sampling_params and self.sampling_params.use_beam_search:
+            # todo: 1. beam search: 一直会有k个句子, 不会剔除.
             # For beam search, maximally there will always be `best_of` beam
             # candidates running in the future.
             return self.sampling_params.best_of
         else:
-            # todo: 此处主要是区分prefill和decode的场景: 1. prefill只有1, 2. decode, 总是有topk个句子.
+            # todo: 非beam seach, 会慢慢剔除句子.
             if (self.sampling_params
                     and self.sampling_params.best_of > self.num_seqs()):
                 # At prompt stage, the sequence group is not yet filled up
@@ -686,7 +690,7 @@ class SequenceGroupMetadata:
         return self._token_chunk_size
 
 
-class SequenceOutput:
+class SequenceOutput:  # todo: 用来封装单个token的output.
     """The model output associated with a sequence.
 
     Args:
@@ -735,10 +739,10 @@ class SequenceGroupOutput(ABC):
 
 class CompletionSequenceGroupOutput(SequenceGroupOutput):
     """The model output associated with a completion sequence group."""
-
+    # todo: 用来描述单个seq group.
     def __init__(
         self,
-        samples: List[SequenceOutput],
+        samples: List[SequenceOutput],  # todo: list表示seq group中多个token输出.
         prompt_logprobs: Optional[PromptLogprobs],
     ) -> None:
         self.samples = samples
@@ -783,9 +787,10 @@ class SamplerOutput:
     This data structure implements methods, so it can be used like a list, but
     also has optional fields for device tensors.
     """
+    # todo: 用来描述所有的seq group.
+    outputs: List[CompletionSequenceGroupOutput]  # todo: CompletionSequenceGroupOutput代表其中1个seq group.
 
-    outputs: List[CompletionSequenceGroupOutput]
-
+    # todo: 下面3个是关于on_device_tensors, 可以先不用管.
     # On-device tensor containing probabilities of each token.
     sampled_token_probs: Optional[torch.Tensor] = None
 

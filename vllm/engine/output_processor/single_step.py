@@ -58,7 +58,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
         assert len(outputs) == 1, ("Single step should only has 1 output.")
-        output = outputs[0]
+        output = outputs[0]  # todo: step 0.
         prompt_logprobs = output.prompt_logprobs
         if prompt_logprobs is not None:
             if seq_group.sampling_params.detokenize and self.detokenizer:
@@ -82,6 +82,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         }
         for sample in samples:
             parent_child_dict[sample.parent_seq_id].append(sample)
+
+        # todo: 收集解码结果, child seq -> parent seq, list代表当前seq group生成的所有token.
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 

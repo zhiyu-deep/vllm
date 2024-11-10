@@ -48,6 +48,7 @@ class SchedulingBudget:
     happen if we only have chunked prefill scheduling, we can remove this
     feature from the API when chunked prefill is enabled by default.
     """
+    # todo: 注释的含义是, origin schedule可能计算两遍, 通过request id感知, 可以忽略第二次变动.
     token_budget: int
     max_num_seqs: int
     _requeset_ids_num_batched_tokens: Set[str] = field(default_factory=set)
@@ -596,6 +597,7 @@ class Scheduler:
         )
 
     def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
+        # todo: max_model_len, max_num_batched_tokens, 通过参数限制了prompt长度.
         if self.scheduler_config.chunked_prefill_enabled:
             prompt_limit = self.scheduler_config.max_model_len
         else:
@@ -648,8 +650,14 @@ class Scheduler:
         # We don't sort waiting queue because we assume it is sorted.
         # Copy the queue so that the input queue is not modified.
         waiting_queue = deque([s for s in waiting_queue])
-
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
+
+        # todo: 主要完成的工作:
+        #   0. 判断delay信息, 是否运行调度prefill.
+        #   1. 得到prompt tokens.
+        #   2. 判断prompt tokens是否过长.
+        #   3. 判断block table中能否放得下prompt tokens.
+        #   4. 判断bucket中能否放得下prompt tokens(句子个数和tokens个数角度考虑).
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
@@ -678,7 +686,7 @@ class Scheduler:
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(seq_group)
             if can_allocate == AllocStatus.LATER:
-                break
+                break  # todo: break代表还留在wait deque中.
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
@@ -705,6 +713,7 @@ class Scheduler:
                     continue
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
+            # todo: num_new_tokens, 从得到num_new_tokens的地方可以看出来, num_new_tokens=0代表bucket中为空.
             if (num_new_tokens == 0
                     or not budget.can_schedule(num_new_tokens=num_new_tokens,
                                                num_new_seqs=num_new_seqs)):
@@ -723,7 +732,7 @@ class Scheduler:
 
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
-        if len(seq_groups) > 0:
+        if len(seq_groups) > 0:  # todo: 表示调度prefill成功.
             self.prev_prompt = True
 
         return waiting_queue, SchedulerPrefillOutputs(
@@ -741,9 +750,10 @@ class Scheduler:
         """
         # Include running requests to the budget.
         budget = SchedulingBudget(
-            token_budget=self.scheduler_config.max_num_batched_tokens,
-            max_num_seqs=self.scheduler_config.max_num_seqs,
+            token_budget=self.scheduler_config.max_num_batched_tokens,  # todo: 控制chunk size, 最大chunk size.
+            max_num_seqs=self.scheduler_config.max_num_seqs,            # todo: 控制seqs, 代表最大decode tokens, 防止显存溢出(max seqs计算方式见论文).
         )
+        # todo: 从此处看出来, max_num_seqs在考虑显存的时候已经把gpu+cpu(swap空间)都考虑进去了, 因为running的句子就会占据存储空间(要么在gpu里, 要么在cpu里).
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
@@ -760,6 +770,13 @@ class Scheduler:
         remaining_swapped, swapped_in = (
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
+        # todo: schedule default特点:
+        #   1. schedule prefill, 使得显存中的句子尽可能的多, 提高decode throughout.
+        #       1.1 优先调度swap, 有swap则先将swap当作prefill.
+        #       1.2 无swap, 再将普通句子当作prefill.
+        #   2. schedule decode, prefill和decode不会同时发生, 当无prefill, 开始处理decode.
+        #       2.1 优先处理running.
+        #       2.2 当running有剩余空间, 开始调度swap, 这个时候, swap的prefill和decode并行.
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
             remaining_waiting, prefills = self._schedule_prefills(
@@ -1148,9 +1165,15 @@ class Scheduler:
             seq.status = SequenceStatus.SWAPPED
 
     def _passed_delay(self, now: float) -> bool:
+        # todo: pre_prompt代表的是上一次成功调度到prefill, 此处尝试进行调度prefill, 此处的动作:
+        #   1. 计算此次尝试距离上次成功prefill的时间.
+        #   2. 记录此次尝试prefill的时间.
+        #   3. prev_prompt=false, 开始尝试, 还未成功.
         if self.prev_prompt:
             self.last_prompt_latency = now - self.prev_time
         self.prev_time, self.prev_prompt = now, False
+
+        # todo: passed_delay代表是否允许schedule prefill, 因为有些限制可能阻止成功schedule prefill, 此处就是check这些限制.
         # Delay scheduling prompts to let waiting queue fill up
         if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(

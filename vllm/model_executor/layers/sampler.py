@@ -708,7 +708,7 @@ def _get_logprobs(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     sample_results: SampleResultType,
-) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
+) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:  # todo: list表示k个seq group.
     """Return sample lobprobs and prompt logprobs.
 
     The logic consists of 3 parts.

@@ -17,7 +17,7 @@ class LogicalTokenBlock:
 
     def __init__(
         self,
-        block_number: int,
+        block_number: int,  # todo: 在seq logic block list中的index.
         block_size: int,
     ) -> None:
         self.block_number = block_number
