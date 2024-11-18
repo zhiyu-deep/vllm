@@ -103,6 +103,7 @@ class SchedulingBudget:
 class ScheduledSequenceGroup:
     # A sequence group that's scheduled.
     seq_group: SequenceGroup
+    # todo: decode seqGroup = 1, prefill seqGroup = chunk size(<=prompt length).
     # The total chunk size (number of tokens) to process for next iteration.
     # 1 for decoding. Same as prompt tokens for prefill, but if prefill is
     # chunked, it can be smaller than that.
@@ -116,13 +117,14 @@ class SchedulerOutputs:
     scheduled_seq_groups: Iterable[ScheduledSequenceGroup]
     # Number of prefill groups scheduled.
     num_prefill_groups: int
-    # Total number of batched tokens.
+    # Total number of batched tokens.  todo: prefill tokens + decode tokens, 统统当作1个batch的tokens进行处理.
     num_batched_tokens: int
     # Blocks to swap in. List of CPU -> GPU block number.
     blocks_to_swap_in: List[Tuple[int, int]]
     # Blocks to swap out. List of GPU -> CPU block number.
     blocks_to_swap_out: List[Tuple[int, int]]
     # Blocks to copy. Source to dest block.
+    # todo: gpu -> gpu block number, 当两句话开始是share tokens, 其中1句话新增token的时候, 会copy末页(当作全新页).
     blocks_to_copy: List[Tuple[int, int]]
     # Sequence groups that are going to be ignored.
     ignored_seq_groups: List[SequenceGroup]
@@ -130,7 +132,7 @@ class SchedulerOutputs:
     num_lookahead_slots: int
     # The number of requests in the running queue
     running_queue_size: int
-    preempted: int
+    preempted: int  # todo: 在调度过程中, 被preempted的seqGroups总个数(preempt + swap out).
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -161,19 +163,19 @@ class SchedulerOutputs:
 
 @dataclass
 class SchedulerRunningOutputs:
-    """The requests that are scheduled from a running queue.
+    """The requests that are scheduled (from a running queue!!!).
 
     Could contain prefill (prefill that's chunked) or decodes. If there's not
     enough memory, it can be preempted (for recompute) or swapped out.
     """
-    # Selected sequences that are running and in a decoding phase.
+    # Selected sequences that are running and in a decoding phase.  todo: running中处于decoding状态的seqGroups.
     decode_seq_groups: List[SequenceGroup]
-    # Selected sequences that are running and in a prefill phase.
+    # Selected sequences that are running and in a prefill phase.  # todo: running中处于prefill状态的seqGroups(继续prefill, 说明是chunk prefill).
     # I.e., it means the prefill has been chunked.
     prefill_seq_groups: List[SequenceGroup]
-    # The preempted sequences.
+    # The preempted sequences.  todo: preempt, 表示seq相关资源全都被释放了, new prompt = ori prompt + generated tokens.
     preempted: List[SequenceGroup]
-    # Sequences that are swapped out.
+    # Sequences that are swapped out.  todo: seq相关资源未被释放, 转移到cpu中.
     swapped_out: List[SequenceGroup]
     # The blocks to swap out.
     blocks_to_swap_out: List[Tuple[int, int]]
@@ -201,6 +203,9 @@ class SchedulerSwappedInOutputs:
 
     Could contain prefill (prefill that's chunked) or decodes.
     """
+    # todo: swap queue其实等同于running queue, 只是swap queue中的seqGroup在运行之前需要先swap到gpu中, 然后开始正常流程, 所以包含:
+    #   1. blocks_to_swap_in: 代表swap的blocks, 从swap queue回到running queue状态.
+    #   2. blocks_to_copy: 回到gpu之前, 继续计算, 则涉及到blocks_to_copy
     # Selected sequences that are going to be swapped in and is in a
     # decoding phase.
     decode_seq_groups: List[SequenceGroup]
@@ -230,10 +235,9 @@ class SchedulerSwappedInOutputs:
 
 @dataclass
 class SchedulerPrefillOutputs:
-    """The requests that are scheduled from a waiting queue.
+    """The requests that are scheduled (from a waiting queue!!!).
 
-    Could contain a fresh prefill requests or preempted requests that need
-    to be recomputed from scratch.
+    Could contain a fresh prefill requests or preempted requests that need to be recomputed from scratch.
     """
     # Selected sequences for prefill.
     seq_groups: List[SequenceGroup]
@@ -411,14 +415,19 @@ class Scheduler:
         running_queue = policy.sort_by_priority(now, running_queue)
         while running_queue:
             seq_group = running_queue[0]
+            # todo: 当前seq group接下来需要运行的tokens.
+            #   1. enable chunk + prefill: 会根据bucket截断, 确定tokens数目.
+            #   2. decode, 则是所有句子的decode数量.
+            #       note: decode考虑所有句子的token, 会超出bucket么?
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
+            # todo: 等于0代表bucket放不下了, 退出调度.
             if num_running_tokens == 0:
                 break
 
             running_queue.popleft()
-            while not self._can_append_slots(seq_group):
+            while not self._can_append_slots(seq_group):  # todo: _can_append_slots == false, 放不下的情况, 循环将running中seqs剔除.
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -448,7 +457,7 @@ class Scheduler:
                     else:
                         swapped_out.append(seq_group)
                     break
-            else:
+            else:   # todo: _can_append_slots == true, 放得下的情况.
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
                 if is_prefill:
@@ -570,6 +579,11 @@ class Scheduler:
 
             if lora_int_id > 0 and curr_loras is not None:
                 curr_loras.add(lora_int_id)
+
+            # todo: 下面的操作swap进来后, 就和running中调度成功一致:
+            #   1. swap回gpu.
+            #   2. block to copy.
+            #   3. 添加prefill或者decode seqGroups.
             swapped_queue.popleft()
             self._swap_in(seq_group, blocks_to_swap_in)
             self._append_slots(seq_group, blocks_to_copy)
@@ -654,10 +668,10 @@ class Scheduler:
 
         # todo: 主要完成的工作:
         #   0. 判断delay信息, 是否运行调度prefill.
-        #   1. 得到prompt tokens.
+        #   1. 得到prompt tokens(chunked according to bucket or all seq tokens).
         #   2. 判断prompt tokens是否过长.
         #   3. 判断block table中能否放得下prompt tokens.
-        #   4. 判断bucket中能否放得下prompt tokens(句子个数和tokens个数角度考虑).
+        #   4. 判断bucket中能否放得下prompt tokens(最大运行句子个数和tokens个数角度考虑).
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
@@ -668,6 +682,8 @@ class Scheduler:
             num_new_tokens = self._get_num_new_tokens(seq_group,
                                                       SequenceStatus.WAITING,
                                                       enable_chunking, budget)
+
+            # todo: 本接口兼容chunk和非chunk, 非chunk情况下, token不会截断, chunked tokens = prompt tokens.
             if not enable_chunking:
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
@@ -686,7 +702,7 @@ class Scheduler:
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(seq_group)
             if can_allocate == AllocStatus.LATER:
-                break  # todo: break代表还留在wait deque中.
+                break  # todo: break代表停止处理, 后续seqGroups仍留在wait deque中.
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
@@ -713,7 +729,7 @@ class Scheduler:
                     continue
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            # todo: num_new_tokens, 从得到num_new_tokens的地方可以看出来, num_new_tokens=0代表bucket中为空.
+            # todo: num_new_tokens == 0, 说明bucket截断到0个token, 即已经满了.
             if (num_new_tokens == 0
                     or not budget.can_schedule(num_new_tokens=num_new_tokens,
                                                num_new_seqs=num_new_seqs)):
@@ -750,10 +766,11 @@ class Scheduler:
         """
         # Include running requests to the budget.
         budget = SchedulingBudget(
-            token_budget=self.scheduler_config.max_num_batched_tokens,  # todo: 控制chunk size, 最大chunk size.
-            max_num_seqs=self.scheduler_config.max_num_seqs,            # todo: 控制seqs, 代表最大decode tokens, 防止显存溢出(max seqs计算方式见论文).
+            token_budget=self.scheduler_config.max_num_batched_tokens,  # todo: 控制最大batch size(prefill tokens + decode tokens).
+            max_num_seqs=self.scheduler_config.max_num_seqs,            # todo: 控制最大seqs, 防止显存溢出(max seqs计算方式见论文).
         )
-        # todo: 从此处看出来, max_num_seqs在考虑显存的时候已经把gpu+cpu(swap空间)都考虑进去了, 因为running的句子就会占据存储空间(要么在gpu里, 要么在cpu里).
+        # todo: schedule default优先保证decode最大化, 先让running(无chunk, 全为decode)占位, 可以防止running被踢出;
+        #   保证decode占位的同时, 尽量吸收prefill进来.
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
@@ -771,7 +788,7 @@ class Scheduler:
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
         # todo: schedule default特点:
-        #   1. schedule prefill, 使得显存中的句子尽可能的多, 提高decode throughout.
+        #   1. schedule prefill, 优先调度prefill, 使得显存中的句子尽可能的多, 提高decode throughout.
         #       1.1 优先调度swap, 有swap则先将swap当作prefill.
         #       1.2 无swap, 再将普通句子当作prefill.
         #   2. schedule decode, prefill和decode不会同时发生, 当无prefill, 开始处理decode.
@@ -807,7 +824,7 @@ class Scheduler:
 
         # Update waiting requests.
         self.waiting = remaining_waiting
-        self.waiting.extendleft(running_scheduled.preempted)
+        self.waiting.extendleft(running_scheduled.preempted)  # todo: preempt句子状态全被释放, 当作原始prompt.
         # Update new running requests.
         self.running = remaining_running
         self.running.extend([s.seq_group for s in prefills.seq_groups])
@@ -869,6 +886,7 @@ class Scheduler:
         remaining_swapped, swapped_in = (
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
+        # todo: 这就是decode maximal的原理, 总是decode优先.
         # Decoding should be always scheduled first by fcfs.
         fcfs_policy = PolicyFactory.get_policy(policy_name="fcfs")
         remaining_running, running_scheduled = self._schedule_running(
@@ -1217,6 +1235,8 @@ class Scheduler:
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
+
+        # todo: 仅在enable chunk和prefill阶段进行阶段, 使用bucket进行chunk截断(其他时候, 均是所有tokens).
         # Chunk if a running request cannot fit in.
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.

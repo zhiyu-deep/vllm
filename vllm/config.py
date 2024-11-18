@@ -702,7 +702,7 @@ class SchedulerConfig:
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
-                self.max_num_batched_tokens = max(max_model_len, 2048)
+                self.max_num_batched_tokens = max(max_model_len, 2048)  # todo: 对tokens有限制.
         if enable_chunked_prefill:
             logger.info("Chunked prefill is enabled (EXPERIMENTAL).")
 
