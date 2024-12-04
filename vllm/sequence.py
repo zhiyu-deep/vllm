@@ -28,7 +28,7 @@ class Logprob:
         decoded_token: The decoded chosen token index
     """
     logprob: float
-    rank: Optional[int] = None
+    rank: Optional[int] = None  # todo: rank表示当前token在k个最佳token中的排序(>=1).
     decoded_token: Optional[str] = None
 
 
@@ -37,11 +37,13 @@ class Logprob:
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 # {token_id -> logprob} for each sequence group.
 # todo: 针对1个seq group:
-#  1. list表示在解码后得到, 下一个step的所有token.
+#  1. list表示seqGroups中, 在解码后得到, 下一个step的所有token.
 #  2. dict中包含了sample token及其备选k-1个sample tokens(来自同一个parent seq, 有时候需要返回k个最佳token).
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
+# todo: sequenceStatus表示每个step, sequence所处的动态执行状态(run还是stop等状态);
+#  后面的sequenceStage表示当前step, seq new tokens所处的计算方式, 决定了怎么去计算这个token(prefill还是decode).
 class SequenceStatus(enum.Enum):
     """Status of a sequence."""
     WAITING = enum.auto()
@@ -103,6 +105,13 @@ class RequestMetrics:
     finished_time: Optional[float] = None
 
 
+# todo: 主要存储内容:
+#  1. sequence的tokens信息和Log信息.
+#  2. sequence状态信息
+#   2.1 _stage: step tokens的计算方式, prefill还是decode
+#               (关注何时切换step, 表示当前step还是next step)
+#               (理论上: engine开始当前step推理的时候, seq中状态都已经更新完毕, 表示新的step; 更具体的说, 在post和schedule结束后, seq中status已经完全切换到当前step了).
+#   2.2 _num_computed_tokens: 当前step处于prefill时, 已经计算完毕的tokens.
 class SequenceData:
     """Data associated with a sequence.
 
@@ -129,7 +138,8 @@ class SequenceData:
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
-        # todo: chunk prefill下, prompt token不一定完全计算.
+
+        # todo: prefill状态下, 用来关注已经计算的tokens; chunk prefill下, prompt token不一定一次算的完.
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
@@ -156,12 +166,13 @@ class SequenceData:
         """Get prefix tokens, and make the return value hashable"""
         prompt_length = len(self.prompt_token_ids)
         if num_tokens > prompt_length:
+            # todo: 指定num_tokens过长, 包含decode内容.
             return (self._prompt_token_ids_tuple,
                     tuple(self.output_token_ids[:num_tokens - prompt_length]))
         else:
             return (self._prompt_token_ids_tuple[:num_tokens], None)
 
-    # todo: 下面几个函数, 应该在seq处于prefill状态下调用.
+    # todo: 下面几个函数, 应该在seq当前step处于prefill状态下调用(跟prefill相关的几个状态).
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
         return self._num_computed_tokens
@@ -212,6 +223,10 @@ class SequenceData:
                 f"cumulative_logprob={self.cumulative_logprob})")
 
 
+# todo: 主要存储内容:
+#   1. 存储句子信息: SequenceData(self.data), output tokens(self.output_logprobs), output text(self.output_text).
+#   2. logic block信息(分页).
+#   3. seq运行状态信息, running还是wait.
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
@@ -231,7 +246,6 @@ class Sequence:
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
-        # todo: input info.
         self.seq_id = seq_id
         self.inputs = inputs
         self.block_size = block_size
@@ -239,7 +253,7 @@ class Sequence:
         self.lora_request = lora_request
 
         self.data = SequenceData(self.prompt_token_ids)
-        self.output_logprobs: list[Dict[int, Logprob]] = []  # todo: list表示当前句子生成的token列表, Dict[int, Logprob]表示当前token的所有候选tokens.
+        self.output_logprobs: list[Dict[int, Logprob]] = []  # todo: list表示当前句子生成的token列表, Dict[int, Logprob]表示该生成token的所有备选tokens.
         self.output_text = ""
 
         self.status = SequenceStatus.WAITING
@@ -271,12 +285,14 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
+    # todo: buffer_length表示在未完全结束的情况下, 留多少tokens先不展示, 所以返回[:-buffer_length]
     def get_output_text_to_return(self, buffer_length: int):
         # We return the full output text if the sequence is finished.
         truncate = buffer_length and not self.is_finished()
         return self.output_text[:-buffer_length] if truncate else (
             self.output_text)
 
+    # todo: 对指定的blocks中tokens计算hash value.
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
 
@@ -378,6 +394,7 @@ class Sequence:
         new_seq.seq_id = new_seq_id
         return new_seq
 
+    # todo: 当前Seq已经处于decode或者prefill状态, 当前Step需要计算的tokens个数.
     def get_num_new_tokens(self) -> int:
         """Get the number of new tokens to be computed.
 
@@ -406,6 +423,9 @@ class SequenceGroupState:
     generator: Optional = None  # type: ignore
 
 
+# todo:
+#   1. 对seqs的封装, 对外接口用来返回seqs的状态信息.
+#   2. 保存了metrix信息.
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -428,7 +448,7 @@ class SequenceGroup:
         request_id: str,
         seqs: List[Sequence],
         arrival_time: float,
-        sampling_params: Optional[SamplingParams] = None,
+        sampling_params: Optional[SamplingParams] = None,  # todo: 1个seqGroup对应1个sample请求或者pool请求.
         lora_request: Optional[LoRARequest] = None,
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
@@ -509,20 +529,23 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
-        # todo: 像是预测, 接下来计算过程, 最多有几个句子运行.
+        # todo: 预测接下来计算过程, 当前seqGroup中最多有几个句子运行.
         if self.sampling_params and self.sampling_params.use_beam_search:
             # todo: 1. beam search: 一直会有k个句子, 不会剔除.
             # For beam search, maximally there will always be `best_of` beam
             # candidates running in the future.
             return self.sampling_params.best_of
         else:
-            # todo: 非beam seach, 会慢慢剔除句子.
+            # todo: 注意是num_seqs(代表所有seqs), >self.num_seqs(), 说明当前在prefill阶段(因为decode阶段会永远==num_seqs), 则最多会有best_of个句子在运行.
             if (self.sampling_params
                     and self.sampling_params.best_of > self.num_seqs()):
                 # At prompt stage, the sequence group is not yet filled up
                 # and only have one sequence running. However, in the
                 # generation stage, we will have `best_of` sequences running.
                 return self.sampling_params.best_of
+            # todo: 运行到此处, 可能是decode阶段, 也可能best_of=1并且处于prefill或者decode阶段(因为best_of==num_seqs).
+            #  1. decode阶段: 则为num_unfinished_seqs, sample阶段, best_of和beam_search的区别在于个数会慢慢减少, 返回实际运行的句子数.
+            #  2. prefill阶段: num_unfinished_seqs = best_of = 1.
             # At sampling stages, return the number of actual sequences
             # that are not finished yet.
             return self.num_unfinished_seqs()
@@ -604,6 +627,7 @@ class SequenceGroup:
                 f"num_seqs={len(self.seqs_dict)})")
 
 
+# todo: 将seqGroup转为seqGroupMeta用于推理.
 class SequenceGroupMetadata:
     """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
@@ -621,7 +645,7 @@ class SequenceGroupMetadata:
             None if chunking is not required.
         lora_request: LoRA request.
         computed_block_nums: The block numbers that are already computed,
-            used in prefix caching.
+            used in prefix caching.  # todo: seqGroup中多个句子的情况下, 把他们的交集当作prefix.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
@@ -639,14 +663,14 @@ class SequenceGroupMetadata:
         self,
         request_id: str,
         is_prompt: bool,
-        seq_data: Dict[int, SequenceData],
+        seq_data: Dict[int, SequenceData],  # todo: {seqId: SequenceData}
         sampling_params: SamplingParams,
-        block_tables: Dict[int, List[int]],
+        block_tables: Dict[int, List[int]], # todo: {seqId: block tables}
         do_sample: bool = True,
         pooling_params: Optional[PoolingParams] = None,
         token_chunk_size: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
-        computed_block_nums: Optional[List[int]] = None,
+        computed_block_nums: Optional[List[int]] = None,  # todo: same blockIdxes.
         state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional["MultiModalData"] = None,
         encoder_seq_data: Optional[SequenceData] = None,

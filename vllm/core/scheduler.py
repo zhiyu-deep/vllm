@@ -48,7 +48,8 @@ class SchedulingBudget:
     happen if we only have chunked prefill scheduling, we can remove this
     feature from the API when chunked prefill is enabled by default.
     """
-    # todo: 注释的含义是, origin schedule可能计算两遍, 通过request id感知, 可以忽略第二次变动.
+    # todo:
+    #  origin schedule可能计算两遍(origin schedule开始的时候会先加到bucket中, 后续schedule过程中会再次加到bucket中, 避免重复添加需要使用set).
     token_budget: int
     max_num_seqs: int
     _requeset_ids_num_batched_tokens: Set[str] = field(default_factory=set)
@@ -417,17 +418,19 @@ class Scheduler:
             seq_group = running_queue[0]
             # todo: 当前seq group接下来需要运行的tokens.
             #   1. enable chunk + prefill: 会根据bucket截断, 确定tokens数目.
-            #   2. decode, 则是所有句子的decode数量.
-            #       note: decode考虑所有句子的token, 会超出bucket么?
+            #   2. decode, 则是所有句子的decode数量(不chunk).
+            #       note: decode考虑所有句子的token, prefill变成decode没准tokens会增加, 会超出bucket么?
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
-            # todo: 等于0代表bucket放不下了, 退出调度.
+            # todo: 等于0代表bucket放不下token了, 后面没必要看了, 退出调度.
+            # todo: 因为running队列是之前已经运行的seqs, 说明之前seqs个数是合理的, 所以此次running调度不需要检查seqs个数.
             if num_running_tokens == 0:
                 break
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):  # todo: _can_append_slots == false, 放不下的情况, 循环将running中seqs剔除.
+                # todo: 因为当前句子放不下了, 为了后面逻辑的统一, 先将当前句子剔除.
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -488,7 +491,7 @@ class Scheduler:
             swapped_out=swapped_out,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            num_lookahead_slots=self._get_num_lookahead_slots(
+            num_lookahead_slots=self._get_num_lookahead_slots(  # todo: lookahead slots干嘛的?
                 is_prefill=False))
 
     def _schedule_swapped(
@@ -699,10 +702,11 @@ class Scheduler:
                 waiting_queue.popleft()
                 continue
 
+            # todo: 判断block table是否放得下prefill部分.
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(seq_group)
             if can_allocate == AllocStatus.LATER:
-                break  # todo: break代表停止处理, 后续seqGroups仍留在wait deque中.
+                break
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
@@ -728,8 +732,8 @@ class Scheduler:
                     waiting_queue.popleft()
                     continue
 
-            num_new_seqs = seq_group.get_max_num_running_seqs()
             # todo: num_new_tokens == 0, 说明bucket截断到0个token, 即已经满了.
+            num_new_seqs = seq_group.get_max_num_running_seqs()
             if (num_new_tokens == 0
                     or not budget.can_schedule(num_new_tokens=num_new_tokens,
                                                num_new_seqs=num_new_seqs)):
@@ -739,6 +743,7 @@ class Scheduler:
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
+            # todo: 不同于running(running中是block copy indexes), prefill需要block manager分配block信息.
             self._allocate_and_set_running(seq_group)
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
@@ -1236,7 +1241,11 @@ class Scheduler:
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
 
-        # todo: 仅在enable chunk和prefill阶段进行阶段, 使用bucket进行chunk截断(其他时候, 均是所有tokens).
+        # todo: 主要目的是使用bucket进行chunk, 返回0表示因为bucket无法运算, 返回>0表示chunk得到tokens.
+        #   1. seqs > 1: 非prefill, 不用chunk.
+        #   2. status seqs == 1:
+        #       2.1 decode句子: 可能能正常运行, 也可能无法运行.
+        #       2.2 prefill: 可能chunk后正常运行, 也可能无法运行.
         # Chunk if a running request cannot fit in.
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.

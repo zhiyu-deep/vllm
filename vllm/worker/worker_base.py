@@ -90,6 +90,9 @@ class LoraNotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
 
+# todo: 对worker的wrapper:
+#   1. lazy initialize.
+#   2. 多线程环境下信息传递, 一个thread对应1个worker, wrapper将命令信息传递给worker.
 class WorkerWrapperBase:
     """
     The whole point of this class is to lazily initialize the worker.

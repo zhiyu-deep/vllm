@@ -8,6 +8,7 @@ _BLANK_TOKEN_ID = -1
 DEFAULT_LAST_ACCESSED_TIME = -1
 
 
+# todo: 在逻辑层面, 表示句子占用了多少个LogicalTokenBlock, 每个LogicalTokenBlock中保存的token信息.
 class LogicalTokenBlock:
     """A block that stores a contiguous chunk of tokens from left to right.
 

@@ -220,6 +220,8 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
+
+        # todo: 和schedule状态有关, 不能await(协程).
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         if not scheduler_outputs.is_empty():
@@ -237,6 +239,7 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             output = []
 
+        # todo: process关于状态信息, 无法await(协程).
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
