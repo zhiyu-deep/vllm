@@ -239,6 +239,9 @@ class Worker(WorkerBase):
             broadcast_tensor_dict({}, src=0)
             return []
 
+        # todo: 模型执行分成两部分.
+        #   1. seqGroupMeta中的信息, 用来推理.
+        #   2. 额外还有一些block相关的信息, 用来管理cache.
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         num_seq_groups = len(seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.

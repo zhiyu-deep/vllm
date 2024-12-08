@@ -71,6 +71,7 @@ class ModelInput(NamedTuple):
         )
 
 
+# todo: ModelRunner是单线程环境内完成推理(中间可能涉及点和点之间的数据交互).
 class ModelRunner:
 
     def __init__(
