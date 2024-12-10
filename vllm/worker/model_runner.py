@@ -679,7 +679,6 @@ class ModelRunner:
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
 
-            # todo: dict整合所有数据进行交互.
             metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
@@ -697,7 +696,7 @@ class ModelRunner:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
-            # todo: 非driver的角度, 获取dict, 从dict中获取: 1. inputs, 2. attentionMeta, 3. sampleMeta(非driver只关注selected_token_indices)
+            # todo: 非driver的角度, 获取dict, 从dict中获取: 1. inputs, 2. attentionMeta中信息, 3. sampleMeta中信息.
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
