@@ -186,6 +186,10 @@ class CustomAllreduce:
             return
 
         self.disabled = False
+
+        # todo: 包含两部分内容:
+        #  1. meta struct,
+        #  2. 线程内部用来存放reduce结果.
         # buffers memory are owned by this Python class and passed to C++
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
@@ -193,11 +197,13 @@ class CustomAllreduce:
         self.meta = torch.zeros(ops.meta_size() + max_size,
                                 dtype=torch.uint8,
                                 device=self.device)
+        # todo: allReduce内部基于固定buffer进行运算; 每次reduce会将input拷贝到buffer.
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
         self.buffer = torch.empty(max_size,
                                   dtype=torch.uint8,
                                   device=self.device)
+        # todo: 固定buffer模式下, 用来存放每个固定buffer的指针(包括IPC buffer, 8 * sizeof(size_t) * 131072).
         # This is a buffer for storing the tuples of pointers pointing to
         # IPC buffers from all ranks. Each registered tuple has size of
         # 8*world_size bytes where world_size is at most 8. Allocating 8MB
@@ -230,6 +236,7 @@ class CustomAllreduce:
             if not self.disabled:
                 self.register_graph_buffers()
 
+    # todo: 以下两个函数是功能函数: 针对某个tensor, 获取ipc ptr信息(handles: [ranks个handle], offsets: [rankds个offset]).
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.untyped_storage()._share_cuda_()
         shard_data = (
@@ -237,7 +244,6 @@ class CustomAllreduce:
             data[3],  # offset of base ptr
         )
         return self._gather_ipc_meta(shard_data)
-
     def _gather_ipc_meta(self, shard_data):
         # Note: don't use `[[None]] * self.world_size` here
         # because it will create a list of the same reference
@@ -264,6 +270,7 @@ class CustomAllreduce:
             offsets.append(all_data[i][0][1])  # type: ignore
         return handles, offsets
 
+    # todo: 功能函数: 针对input tensor, 将其相关的IPC ptr保存起来.
     def register_buffer(self, inp: torch.Tensor):
         handles, offsets = self._get_ipc_meta(inp)
         ops.register_buffer(self._ptr, inp, handles, offsets)
