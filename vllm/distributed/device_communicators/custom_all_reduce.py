@@ -46,6 +46,7 @@ except ImportError:
 logger = init_logger(__name__)
 
 
+# todo: 注意该函数基于物理卡id进行检测.
 @_nvml()
 def _is_full_nvlink(device_ids: List[int]) -> bool:
     """
@@ -134,6 +135,7 @@ class CustomAllreduce:
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
+        # todo: 此处的rank设置的是逻辑卡id(CUDA_VISIBLE_DEVICES进一步将其映射到物理卡id).
         if device is None:
             local_rank = get_local_rank()
             device = torch.device(f"cuda:{local_rank}")
@@ -145,6 +147,7 @@ class CustomAllreduce:
         assert isinstance(device, torch.device)
         self.device = device
 
+        # todo: 以下获取逻辑卡id对应的物理卡id信息.
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))

@@ -117,6 +117,11 @@ def init_distributed_environment(
                 local_rank = rank
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
+
+        # todo: 理解CUDA_VISIBLE_DEVICES:
+        #  torch中的device index指代的是逻辑卡id, 逻辑卡id用来在CUDA_VISIBLE_DEVICES中索引;
+        #  CUDA_VISIBLE_DEVICES将每个逻辑卡id进一步映射到物理卡id;
+        #  所以通过device(index)其实已经对应了1物理卡.
         # A small all_reduce for warmup.
         data = torch.zeros(1)
         if torch.cuda.is_available():

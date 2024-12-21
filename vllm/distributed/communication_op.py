@@ -87,6 +87,8 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
+
+    # todo: 使用合适的tp allReduce communicator, 优先使用custom; 之后选择使用nccl; 最后选择使用torch.
     if ca_comm is not None:
         out = ca_comm.custom_all_reduce(input_)
         if out is not None:
