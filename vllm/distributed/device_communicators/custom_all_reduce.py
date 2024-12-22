@@ -236,7 +236,7 @@ class CustomAllreduce:
             if not self.disabled:
                 self.register_graph_buffers()
 
-    # todo: 以下两个函数是功能函数: 针对某个tensor, 获取ipc ptr信息(handles: [ranks个handle], offsets: [rankds个offset]).
+    # todo: 以下两个函数是功能函数: 针对某个tensor, 在group中获取ipc ptr信息(handles: [ranks个handle], handle是cuda runtime handle信息, offsets: [rankds个offset]).
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.untyped_storage()._share_cuda_()
         shard_data = (
@@ -270,7 +270,7 @@ class CustomAllreduce:
             offsets.append(all_data[i][0][1])  # type: ignore
         return handles, offsets
 
-    # todo: 功能函数: 针对input tensor, 将其相关的IPC ptr保存起来.
+    # todo: 功能函数: 针对input tensor, 得到group内的handle和offset信息; 将这些信息在cuda内保存起来.
     def register_buffer(self, inp: torch.Tensor):
         handles, offsets = self._get_ipc_meta(inp)
         ops.register_buffer(self._ptr, inp, handles, offsets)

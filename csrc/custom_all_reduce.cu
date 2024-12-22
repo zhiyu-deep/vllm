@@ -9,9 +9,11 @@
 using fptr_t = int64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
-fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
-                      const std::vector<std::string>& handles,
-                      const std::vector<int64_t>& offsets, int64_t rank,
+fptr_t init_custom_ar(torch::Tensor& meta,  // todo: 外部传入的meta矩阵, *meta+1是实际的buffer数据.
+                      torch::Tensor& rank_data,  // todo: rank_data是用来存放ptr及group ptrs的address cache.
+                      const std::vector<std::string>& handles,  // todo: meta矩阵的group handles
+                      const std::vector<int64_t>& offsets,  // todo: meta矩阵的group offsets
+                      int64_t rank,  // todo: 在world内的rank(vector.size即world size)
                       bool full_nvlink) {
   int world_size = offsets.size();
   if (world_size > 8)

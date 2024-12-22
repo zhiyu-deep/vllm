@@ -412,6 +412,10 @@ def meta_size() -> int:
 
 def register_buffer(fa: int, t: torch.Tensor, handles: List[str],
                     offsets: List[int]) -> None:
+    # todo: params:
+    #  1. fa, 内部的custom all reducer对象地址(句柄)
+    #  2. t, 待cache tensor.
+    #  3. handles, offsets: 关联所有tensor的handle信息.
     return torch.ops._C_custom_ar.register_buffer(fa, t, handles, offsets)
 
 

@@ -31,8 +31,11 @@ struct Signal {
   alignas(128) uint32_t end[kMaxBlocks][8];
 };
 
+// todo: customReduce对象内部不保存数据, 通过指针进行控制.
+// todo: 1组ptr, 代表1个group.
 struct __align__(16) RankData { const void* __restrict__ ptrs[8]; };
 
+// todo: 1组signal, 代表1个group.
 struct __align__(16) RankSignals { volatile Signal* signals[8]; };
 
 // like std::array, but aligned
@@ -257,9 +260,9 @@ class CustomAllreduce {
   bool full_nvlink_;
 
   // below are device pointers
-  RankSignals sg_;
+  RankSignals sg_;  // todo: 1组signal
   std::unordered_map<void*, RankData*> buffers_;
-  Signal* self_sg_;
+  Signal* self_sg_;  // todo: 当前thread本身的signal.
 
   // stores the registered device pointers from all ranks
   RankData *d_rank_data_base_, *d_rank_data_end_;
@@ -276,9 +279,12 @@ class CustomAllreduce {
    * note: this class does not own any device memory. Any required buffers
    * are passed in from the constructor
    */
-  CustomAllreduce(Signal* meta, void* rank_data, size_t rank_data_sz,
-                  const cudaIpcMemHandle_t* handles,
-                  const std::vector<int64_t>& offsets, int rank,
+  CustomAllreduce(Signal* meta,  // todo: 外部传入的meta矩阵, *meta+1是实际的buffer数据.
+                  void* rank_data,  // todo: rank_data是用来存放ptr及group ptrs的address cache.
+                  size_t rank_data_sz,  // todo: rank_data矩阵的大小, int8为单位.
+                  const cudaIpcMemHandle_t* handles,  // todo: meta矩阵的group handles
+                  const std::vector<int64_t>& offsets,  // todo: meta矩阵的group offsets
+                  int rank,  // todo: 在world内的rank(vector.size即world size)
                   bool full_nvlink = true)
       : rank_(rank),
         world_size_(offsets.size()),
