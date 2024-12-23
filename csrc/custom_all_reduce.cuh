@@ -268,8 +268,8 @@ class CustomAllreduce {
   bool full_nvlink_;
 
   // below are device pointers
-  RankSignals sg_;  // todo: 1组signal
-  std::unordered_map<void*, RankData*> buffers_;
+  RankSignals sg_;
+  std::unordered_map<void*, RankData*> buffers_;  // todo: cache ptr->group ptrs(位于gpu).
   Signal* self_sg_;  // todo: 当前thread本身的signal.
 
   // stores the registered device pointers from all ranks
