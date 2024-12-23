@@ -158,11 +158,19 @@ DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg,
   // the memory model.
   if constexpr (!final_sync) __threadfence_system();
   if (threadIdx.x < ngpus) {
+    // todo: 主要是为了保护当前process的buffer在不同kernel launch中不被破坏; 采取生产者消费者模式.
+    //  1. 完成计算后, 设置目标位置的状态.
+    //  2. 开始计算时, 读取目标位置的状态.
     // reset flag for next time
     self_sg->start[blockIdx.x][threadIdx.x] = 0;
+
+    // todo: 类似于生产者消费者模式.
+    //  1. 生产者设置所有消费者的slot的status(slot即消费者需要使用的数据).
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
     sg.signals[threadIdx.x]->end[blockIdx.x][rank] = 1;
+    // todo:
+    //  2. 消费者查看自己的slot, 状态设置成功则可以获取数据.
     // wait until we got true from all ranks
     while (!self_sg->end[blockIdx.x][threadIdx.x]);
   }
