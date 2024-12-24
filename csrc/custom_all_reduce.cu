@@ -26,6 +26,7 @@ fptr_t init_custom_ar(torch::Tensor& meta,  // todo: 外部传入的meta矩阵, 
   if (rank < 0 || rank >= world_size)
     throw std::invalid_argument("invalid rank passed in");
 
+  // todo: torch和c++之间的桥梁, 将tensor解析成handle, 之后进入c++环境.
   cudaIpcMemHandle_t ipc_handles[8];
   for (int i = 0; i < world_size; i++) {
     std::memcpy(&ipc_handles[i], handles[i].data(), sizeof(cudaIpcMemHandle_t));
@@ -66,6 +67,7 @@ bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
   if (world_size == 2 || full_nvlink) return inp_size <= max_size;
   // for 4 or more non NVLink-capable GPUs, custom allreduce provides little
   // performance improvement over NCCL.
+  // todo: PCIE上性能不好.
   return false;
 }
 
@@ -104,6 +106,8 @@ void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out) {
   auto stream = c10::cuda::getCurrentCUDAStream().stream();
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
   TORCH_CHECK_EQ(inp.numel(), out.numel());
+
+  // todo: input是已经绑定并cache的, 直接使用.
   _all_reduce(_fa, inp, out, stream);
 }
 
@@ -117,6 +121,10 @@ void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,
   TORCH_CHECK_EQ(inp.numel(), out.numel());
   TORCH_CHECK(input_size <= reg_buffer.numel() * reg_buffer.element_size(),
               "registered buffer is too small to contain the input");
+
+  // todo:
+  //   customReduce环境下, input ptr及group input ptr都是已经绑定好并且cache的(减少减压cuHnadle的性能损失)
+  //   reg_buffer, 指的就是已经绑定并且cache的buffer, 专门给未绑定的input使用, 所以先拷贝到reg_buffer, 再计算.
   AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer.data_ptr(), inp.data_ptr(),
                                 input_size, cudaMemcpyDeviceToDevice, stream));
   _all_reduce(_fa, reg_buffer, out, stream);

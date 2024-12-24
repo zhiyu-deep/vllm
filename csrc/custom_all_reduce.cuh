@@ -165,7 +165,7 @@ DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg,
     self_sg->start[blockIdx.x][threadIdx.x] = 0;
 
     // todo: 类似于生产者消费者模式.
-    //  1. 生产者设置所有消费者的slot的status(slot即消费者需要使用的数据).
+    //  1. 生产者通知所有消费者, 自己已经制造完毕了(slot即消费者所处id).
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
     sg.signals[threadIdx.x]->end[blockIdx.x][rank] = 1;
