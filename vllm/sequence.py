@@ -938,7 +938,7 @@ class SequenceGroupMetadata(
         do_sample: True if sampling is required. Sampling is not required when
             e.g., prefill is chunked, and the current iteration only computes
             query tokens for prefill, we don't need sampling.
-        token_chunk_size: The number of tokens to be processed (per sequence).
+        token_chunk_size: The number of tokens to be processed (per sequence). # todo: 表示每句话需要处理的chunk size, 每句话的chunk size等长.
             None if chunking is not required.
         lora_request: LoRA request.
         computed_block_nums: The block numbers that are already computed,

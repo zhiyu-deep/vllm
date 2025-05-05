@@ -41,21 +41,25 @@ V           V head dim.                         128 in DSV3
 ## Vector/Matrix Definitions
 
 h_t         hidden states (input to attention)  shape [Sq, H]
+
 q_c         latent/compressed Q                 shape [Sq, Lq]
 q_nope      uncompressed Q (no-rope)            shape [Sq, N, P]
 q_pe        uncompressed Q (rope)               shape [Sq, N, R]
+
 kv_c        latent/compressed KV                shape [Skv, Lkv]
 k_pe        decoupled k position embeddings     shape [Skv, R]
 new_kv_c    new kv_c from current iter          shape [Sq, Lkv]
 new_k_pe    new k_pe from current iter          shape [Sq, R]
 cache_kv_c  cached k_c from previous iters      shape [C, Lkv]
 cache_k_pe  cached k_pe from previous iters     shape [C, R]
+
 W_DQ        project h_t to q_c                  shape [H, Lq]
 W_UQ        project q_c to q_nope               shape [Lq, N * P]
 W_QR        project q_c to q_pe                 shape [Lq, N * R]
+
 W_DKV       project h_t to kv_c                 shape [H, Lkv]
-W_UK        project kv_c to k_nope              shape [Lkv, N, P]
 W_KR        project h_t to k_pe                 shape [H, R]
+W_UK        project kv_c to k_nope              shape [Lkv, N, P]
 W_UV        project kv_c to v                   shape [Lkv, N, V]
 W_O         project v to h_t                    shape [N * V, H]
 
@@ -65,10 +69,12 @@ W_O         project v to h_t                    shape [N * V, H]
 q_c      = h_t @ W_DQ
 q_nope   = (q_c @ W_UQ).view(Sq, N, P)
 q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
+
 new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
 kv_c     = torch.cat([new_kv_c, cache_kv_c], dim=0)
 k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
+
 k_nope   = (kv_c @ W_UK.view(Lkv, N * P)).view(Skv, N, P)
 v        = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
 
@@ -1067,12 +1073,18 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
+        # todo:
+        #  P: nope dimension, no rope.            128 in DSV3
+        #  R: rope dimension, goes through rope.  64 in DSV3
+        #  qk_head_dim = P + R
+        #  流程: q_c[Sq, Lq] -> q_nope|q_pe[Sq, num_heads, qk_head_dim]
         q_nope, q_pe = self.q_proj(x)[0]\
             .view(-1, self.num_heads, self.qk_head_dim)\
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
+        # todo: 将heads q映射到latent空间.
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
@@ -1233,9 +1245,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
     def _forward_prefill(
         self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
+        q: torch.Tensor,  # todo: [Sq, N, P+R]
+        kv_c_normed: torch.Tensor, # todo: [Sq, Lkv]
+        k_pe: torch.Tensor,        # todo: [Sq, R]
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
@@ -1246,6 +1258,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         has_context = prefill_metadata.context_lens_tensor is not None \
             and prefill_metadata.context_lens_tensor.max() > 0
 
+        # todo: 在当前step基础上计算得到k nope + v.
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv_nope\
@@ -1380,12 +1393,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             attn_metadata.input_positions[:num_prefill_tokens]
         prefill_k_c_normed = k_c_normed[:num_prefill_tokens]
 
+        # todo: rotary_emb负责对q方向和k方向的Sq tokens进行embedding.
         if has_decode:
+            # todo: decode_ql_nope[Sq, N, Lkv], decode_q_pe[Sq, N, R]
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                 decode_input_positions, decode_q_pe, decode_k_pe)
-
         if has_prefill:
             prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
                 .view(-1, self.num_heads, self.qk_head_dim)

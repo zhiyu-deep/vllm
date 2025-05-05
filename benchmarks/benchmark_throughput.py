@@ -32,7 +32,7 @@ from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 def run_vllm(
     requests: list[SampleRequest],
-    n: int,
+    n: int,  # todo: Number of generated sequences per prompt.
     engine_args: EngineArgs,
     disable_detokenize: bool = False,
 ) -> tuple[float, Optional[list[RequestOutput]]]:

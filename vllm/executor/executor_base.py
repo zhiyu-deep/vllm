@@ -53,10 +53,7 @@ class ExecutorBase(ABC):
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
 
-    @abstractmethod
-    def _init_executor(self) -> None:
-        raise NotImplementedError
-
+    # todo: 任务派发.
     @abstractmethod
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
@@ -80,11 +77,16 @@ class ExecutorBase(ABC):
 
         Returns:
             A list containing the results from each worker.
-        
+
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
+        raise NotImplementedError
+
+    # todo: init.
+    @abstractmethod
+    def _init_executor(self) -> None:
         raise NotImplementedError
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -123,28 +125,7 @@ class ExecutorBase(ABC):
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
-    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function directly on the model inside each worker,
-        returning the result for each of them.
-        """
-
-        def rpc_func(worker: WorkerBase) -> _R:
-            return func(worker.get_model())
-
-        return self.collective_rpc(rpc_func)
-
-    def execute_model(
-        self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(execute_model_req, ))
-        return output[0]
-
-    def stop_remote_worker_execution_loop(self) -> None:
-        """Releases parallel workers from model loop."""
-        return
-
+    # todo: functional.
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
         return all(self.collective_rpc("add_lora", args=(lora_request, )))
@@ -258,12 +239,10 @@ class ExecutorBase(ABC):
     def __del__(self):
         self.shutdown()
 
-    async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        """Executes one model step on the given sequences."""
-        output = await make_async(self.execute_model)(execute_model_req)
-        return output
+    # todo: worker status.
+    def stop_remote_worker_execution_loop(self) -> None:
+        """Releases parallel workers from model loop."""
+        return
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Releases parallel workers from model loop."""
@@ -273,6 +252,32 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+
+    # todo: infer.
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        """
+        Run a function directly on the model inside each worker,
+        returning the result for each of them.
+        """
+
+        def rpc_func(worker: WorkerBase) -> _R:
+            return func(worker.get_model())
+
+        return self.collective_rpc(rpc_func)
+
+    def execute_model(
+            self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
+        output = self.collective_rpc("execute_model",
+                                     args=(execute_model_req, ))
+        return output[0]
+
+    async def execute_model_async(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        """Executes one model step on the given sequences."""
+        output = await make_async(self.execute_model)(execute_model_req)
+        return output
 
 
 class DistributedExecutorBase(ExecutorBase):
@@ -285,6 +290,73 @@ class DistributedExecutorBase(ExecutorBase):
 
         super().__init__(*args, **kwargs)
 
+    # todo: 任务派发.
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        return self._run_workers(method, *args, **(kwargs or {}))
+
+    @abstractmethod
+    def _run_workers(
+            self,
+            method: Union[str, Callable],
+            *args,
+            async_run_tensor_parallel_workers_only: bool = False,
+            max_concurrent_workers: Optional[int] = None,
+            **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers.
+
+        Args:
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
+
+        # TODO: simplify and merge with collective_rpc
+        """
+        raise NotImplementedError
+
+    # todo: worker status.
+    @abstractmethod
+    async def _start_worker_execution_loop(self):
+        """Run execution loop on all workers. It guarantees all workers run
+        the loop or None of them is running the loop. Loop can be stopped by
+        `stop_remote_worker_execution_loop`.
+        The API is idempotent (guarantee only 1 loop run at any moment)."""
+        raise NotImplementedError
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        self._driver_execute_model(execute_model_req=None)
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        self._wait_for_tasks_completion(parallel_worker_tasks)
+
+    async def stop_remote_worker_execution_loop_async(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        await self._driver_execute_model_async()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        await parallel_worker_tasks
+
+    @abstractmethod
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        raise NotImplementedError
+
+    # todo: infer.
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
@@ -300,63 +372,6 @@ class DistributedExecutorBase(ExecutorBase):
         assert driver_outputs is not None
         return driver_outputs
 
-    def stop_remote_worker_execution_loop(self) -> None:
-        if self.parallel_worker_tasks is None:
-            return
-
-        self._driver_execute_model(execute_model_req=None)
-        parallel_worker_tasks = self.parallel_worker_tasks
-        self.parallel_worker_tasks = None
-        # Ensure that workers exit model loop cleanly
-        # (this will raise otherwise)
-        self._wait_for_tasks_completion(parallel_worker_tasks)
-
-    @abstractmethod
-    def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
-        """Run execute_model in the driver worker.
-
-        Passing None will cause the driver to stop the model execution loop
-        running in each of the remote workers. In this case, this method
-        returns None. Otherwise, this method returns the model output.
-        """
-        raise NotImplementedError
-
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
-        return self._run_workers(method, *args, **(kwargs or {}))
-
-    @abstractmethod
-    def _run_workers(
-        self,
-        method: Union[str, Callable],
-        *args,
-        async_run_tensor_parallel_workers_only: bool = False,
-        max_concurrent_workers: Optional[int] = None,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers.
-
-        Args:
-            async_run_tensor_parallel_workers_only: If True the method will be
-                run only in the remote TP workers, not the driver worker.
-                It will also be run asynchronously and return a list of futures
-                rather than blocking on the results.
-        
-        # TODO: simplify and merge with collective_rpc
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
-        raise NotImplementedError
-
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
@@ -368,33 +383,26 @@ class DistributedExecutorBase(ExecutorBase):
         # Only the driver worker returns the sampling results.
         return await self._driver_execute_model_async(execute_model_req)
 
-    async def stop_remote_worker_execution_loop_async(self) -> None:
-        if self.parallel_worker_tasks is None:
-            return
+    @abstractmethod
+    def _driver_execute_model(
+            self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
+        """Run execute_model in the driver worker.
 
-        await self._driver_execute_model_async()
-        parallel_worker_tasks = self.parallel_worker_tasks
-        self.parallel_worker_tasks = None
-        # Ensure that workers exit model loop cleanly
-        # (this will raise otherwise)
-        await parallel_worker_tasks
+        Passing None will cause the driver to stop the model execution loop
+        running in each of the remote workers. In this case, this method
+        returns None. Otherwise, this method returns the model output.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def _driver_execute_model_async(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
         """Execute the model asynchronously in the driver worker.
 
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        raise NotImplementedError
-
-    @abstractmethod
-    async def _start_worker_execution_loop(self):
-        """Run execution loop on all workers. It guarantees all workers run
-        the loop or None of them is running the loop. Loop can be stopped by
-        `stop_remote_worker_execution_loop`.
-        The API is idempotent (guarantee only 1 loop run at any moment)."""
         raise NotImplementedError

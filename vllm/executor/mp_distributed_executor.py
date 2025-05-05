@@ -53,6 +53,55 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
             })
 
+    # todo: 任务派发.
+    def _run_workers(
+            self,
+            method: Union[str, Callable],
+            *args,
+            async_run_tensor_parallel_workers_only: bool = False,
+            max_concurrent_workers: Optional[int] = None,
+            **kwargs,
+    ) -> List[Any]:
+        """Runs the given method on all workers.
+
+        Args:
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
+        """
+        if isinstance(method, str):
+            sent_method = method
+        else:
+            sent_method = cloudpickle.dumps(method)
+        del method
+
+        if max_concurrent_workers:
+            raise NotImplementedError(
+                "max_concurrent_workers is not supported yet.")
+
+        # todo: 只让非driver worker运行.
+        if async_run_tensor_parallel_workers_only:
+            # Run only non-driver workers and just return futures.
+            return [
+                worker.execute_method(sent_method, *args, **kwargs)
+                for worker in self.non_driver_workers
+            ]
+
+        # todo: 非rank0+rank0执行, 非rank0执行是异步的, 所以需要output.get, rank0执行是同步的.
+        # Start all remote workers first.
+        worker_outputs = [
+            worker.execute_method(sent_method, *args, **kwargs)
+            for worker in self.workers
+        ]
+        driver_worker_output = run_method(self.driver_worker, sent_method,
+                                          args, kwargs)
+
+        # Get the results of the workers.
+        return [driver_worker_output
+                ] + [output.get() for output in worker_outputs]
+
+    # todo: init.
     def _init_executor(self) -> None:
 
         from vllm.platforms import current_platform
@@ -133,6 +182,21 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                                       None)) is not None:
             worker_monitor.close()
 
+    # todo: worker status.
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        for result in parallel_worker_tasks:
+            result.get()
+
+    async def _start_worker_execution_loop(self):
+        coros = [
+            worker.execute_method_async("start_worker_execution_loop")
+            for worker in self.non_driver_workers
+        ]
+        return await asyncio.gather(*coros)
+
+    # todo: infer.
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
     ) -> Optional[List[SamplerOutput]]:
@@ -143,67 +207,9 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         """
         return self.driver_worker.execute_model(execute_model_req)
 
-    def _run_workers(
-        self,
-        method: Union[str, Callable],
-        *args,
-        async_run_tensor_parallel_workers_only: bool = False,
-        max_concurrent_workers: Optional[int] = None,
-        **kwargs,
-    ) -> List[Any]:
-        """Runs the given method on all workers.
-
-        Args:
-            async_run_tensor_parallel_workers_only: If True the method will be
-                run only in the remote TP workers, not the driver worker.
-                It will also be run asynchronously and return a list of futures
-                rather than blocking on the results.
-        """
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            sent_method = cloudpickle.dumps(method)
-        del method
-
-        if max_concurrent_workers:
-            raise NotImplementedError(
-                "max_concurrent_workers is not supported yet.")
-
-        if async_run_tensor_parallel_workers_only:
-            # Run only non-driver workers and just return futures.
-            return [
-                worker.execute_method(sent_method, *args, **kwargs)
-                for worker in self.non_driver_workers
-            ]
-
-        # Start all remote workers first.
-        worker_outputs = [
-            worker.execute_method(sent_method, *args, **kwargs)
-            for worker in self.workers
-        ]
-
-        driver_worker_output = run_method(self.driver_worker, sent_method,
-                                          args, kwargs)
-
-        # Get the results of the workers.
-        return [driver_worker_output
-                ] + [output.get() for output in worker_outputs]
-
-    def check_health(self) -> None:
-        """Raises an error if engine is unhealthy."""
-        if self.worker_monitor is not None and not self.worker_monitor.is_alive(
-        ):
-            raise RuntimeError("Worker processes are not running")
-
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
-        for result in parallel_worker_tasks:
-            result.get()
-
     async def _driver_execute_model_async(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
         if not self.tp_driver_workers:
             return await self.driver_exec_model(execute_model_req)
@@ -235,9 +241,8 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         # Only the last PP stage has the final results.
         return results[-1]
 
-    async def _start_worker_execution_loop(self):
-        coros = [
-            worker.execute_method_async("start_worker_execution_loop")
-            for worker in self.non_driver_workers
-        ]
-        return await asyncio.gather(*coros)
+    def check_health(self) -> None:
+        """Raises an error if engine is unhealthy."""
+        if self.worker_monitor is not None and not self.worker_monitor.is_alive(
+        ):
+            raise RuntimeError("Worker processes are not running")

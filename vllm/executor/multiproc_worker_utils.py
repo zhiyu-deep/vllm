@@ -31,6 +31,7 @@ RESET = '\033[0;0m'
 JOIN_TIMEOUT_S = 2
 
 
+# todo: 用来存放worker output.
 @dataclass
 class Result(Generic[T]):
     """Result of task dispatched to worker"""
@@ -40,6 +41,7 @@ class Result(Generic[T]):
     exception: Optional[BaseException] = None
 
 
+# todo: 提交任务的时候, 会返回一个future, 从future中等待结果.
 class ResultFuture(threading.Event, Generic[T]):
     """Synchronous future for non-async case"""
 
@@ -47,10 +49,12 @@ class ResultFuture(threading.Event, Generic[T]):
         super().__init__()
         self.result: Optional[Result[T]] = None
 
+    # todo: 生产者放置结果.
     def set_result(self, result: Result[T]):
         self.result = result
         self.set()
 
+    # todo: 消费者取得结果.
     def get(self) -> T:
         self.wait()
         assert self.result is not None
@@ -72,6 +76,7 @@ def _set_future_result(future: Union[ResultFuture, asyncio.Future],
             loop.call_soon_threadsafe(future.set_result, result.value)
 
 
+# todo: 维护了全局的result queue信息.
 class ResultHandler(threading.Thread):
     """Handle results from all workers (in background thread)"""
 
@@ -81,9 +86,11 @@ class ResultHandler(threading.Thread):
         self.tasks: Dict[uuid.UUID, Union[ResultFuture, asyncio.Future]] = {}
 
     def run(self):
+        # todo: 不停的从queue中取得结果, 然后放到future中.
         for result in iter(self.result_queue.get, _TERMINATE):
             future = self.tasks.pop(result.task_id)
             _set_future_result(future, result)
+        # todo: 结束的时候, 告诉下游任务结束了.
         # Ensure that all waiters will receive an exception
         for task_id, future in self.tasks.items():
             _set_future_result(
@@ -95,6 +102,7 @@ class ResultHandler(threading.Thread):
         self.result_queue.put(_TERMINATE)
 
 
+# todo: 主要是对workers的状态进行管理.
 class WorkerMonitor(threading.Thread):
     """Monitor worker status (in background thread)"""
 
@@ -150,8 +158,10 @@ class ProcessWorkerWrapper:
                  vllm_config: VllmConfig, rank: int) -> None:
         self.mp = get_mp_context()
         self._task_queue = self.mp.Queue()
+
         self.result_queue = result_handler.result_queue
         self.tasks = result_handler.tasks
+
         self.process: BaseProcess = self.mp.Process(  # type: ignore[attr-defined]
             target=_run_worker_process,
             name="VllmWorkerProcess",
@@ -200,7 +210,9 @@ class ProcessWorkerWrapper:
         self._task_queue.close()
         self.process.kill()
 
-
+# todo: 子进程空间, 通过task_queue, result_queue和外面交互.
+#   1. task_queue中内容format: (随机任务id, 需要调用的函数, args, kwargs)
+#   2. result_queue中内容format: (完成的任务id, result内容, 执行过程的exception对象)
 def _run_worker_process(
     worker_factory: Callable[[VllmConfig, int], Any],
     task_queue: Queue,

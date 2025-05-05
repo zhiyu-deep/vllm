@@ -400,6 +400,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.lora_index_mapping = []
             self.lora_prompt_mapping = []
 
+    # todo: InterDataForSeqGroup主要是将SeqGroup中内容转移到InterDataForSeqGroup struct中.
+    #   1. num_seqs: 针对不同的num_seqs进行cache, 相当于1个num_seqs值对应1个InterDataForSeqGroup, cache后, 每次只需要取出来, 往里填充值?
     def gen_inter_data_builder(self, num_seqs: int):
         return lambda: ModelInputForGPUBuilder.InterDataForSeqGroup(
             request_id="",
@@ -408,6 +410,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             block_tables=None,
             computed_block_nums=[])
 
+    # todo: 在已经malloc对象的基础上进行初始化.
     def init_cached_inter_data(self, *args, **kwargs):
         assert len(args) == 0
         assert "seq_ids" in kwargs
@@ -741,6 +744,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.runner.model_config.is_encoder_decoder:
             encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
+        # todo: 从cache中取得的InterDataForSeqGroup, 并且往里init了seqGroup的初始值.
         inter_data = self.init_cached_inter_data(
             request_id=seq_group_metadata.request_id,
             seq_ids=seq_ids,
