@@ -34,6 +34,11 @@ class ExecutorBase(ABC):
 
     uses_ray: bool  # whether the executor uses Ray for orchestration.
 
+    # todo: init.
+    @abstractmethod
+    def _init_executor(self) -> None:
+        raise NotImplementedError
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -52,42 +57,6 @@ class ExecutorBase(ABC):
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
-
-    # todo: 任务派发.
-    @abstractmethod
-    def collective_rpc(self,
-                       method: Union[str, Callable[..., _R]],
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
-        """
-        Execute an RPC call on all workers.
-
-        Args:
-            method: Name of the worker method to execute, or a callable that
-                is serialized and sent to all workers to execute.
-
-                If the method is a callable, it should accept an additional
-                `self` argument, in addition to the arguments passed in `args`
-                and `kwargs`. The `self` argument will be the worker object.
-            timeout: Maximum time in seconds to wait for execution. Raises a
-                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
-            args: Positional arguments to pass to the worker method.
-            kwargs: Keyword arguments to pass to the worker method.
-
-        Returns:
-            A list containing the results from each worker.
-
-        Note:
-            It is recommended to use this API to only pass control messages,
-            and set up data-plane communication to pass data.
-        """
-        raise NotImplementedError
-
-    # todo: init.
-    @abstractmethod
-    def _init_executor(self) -> None:
-        raise NotImplementedError
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
@@ -124,6 +93,37 @@ class ExecutorBase(ABC):
 
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
+
+    # todo: 任务派发.
+    @abstractmethod
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
+        """
+        Execute an RPC call on all workers.
+
+        Args:
+            method: Name of the worker method to execute, or a callable that
+                is serialized and sent to all workers to execute.
+
+                If the method is a callable, it should accept an additional
+                `self` argument, in addition to the arguments passed in `args`
+                and `kwargs`. The `self` argument will be the worker object.
+            timeout: Maximum time in seconds to wait for execution. Raises a
+                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
+            args: Positional arguments to pass to the worker method.
+            kwargs: Keyword arguments to pass to the worker method.
+
+        Returns:
+            A list containing the results from each worker.
+
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
+        """
+        raise NotImplementedError
 
     # todo: functional.
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -226,12 +226,6 @@ class ExecutorBase(ABC):
                                         pattern=pattern,
                                         max_size=max_size))
 
-    @abstractmethod
-    def check_health(self) -> None:
-        """Checks if the executor is healthy. If not, it should raise an
-        exception."""
-        raise NotImplementedError
-
     def shutdown(self) -> None:
         """Shutdown the executor."""
         return
@@ -252,6 +246,12 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+
+    @abstractmethod
+    def check_health(self) -> None:
+        """Checks if the executor is healthy. If not, it should raise an
+        exception."""
+        raise NotImplementedError
 
     # todo: infer.
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
