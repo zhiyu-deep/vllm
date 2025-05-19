@@ -271,17 +271,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     @property
     @abstractmethod
-    def do_metadata_broadcast(self) -> bool:
-        """
-        Used by the default `execute_model` to check whether broadcast is
-        needed to transfer request inputs from the driver worker to other
-        workers in the TP group. If WorkerBase subclass only supports
-        single-worker execution, then this method should return False.
-        """
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         """
         Gets the list of kv caches to pass to the worker's model runner. Each
@@ -289,6 +278,51 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         engine (PP stream). Used by the default `execute_model`. If the worker's
         model runner does not follow the ModelRunnerBase interface, then inherit
         from WorkerBase instead.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        """
+        Process an execution request.
+        """
+        raise NotImplementedError
+
+    # todo: prepare input.
+    #   1. ExecuteModelRequest主要包含了schedule的结果, 包含了sequence上下文信息, 以及kv cache block idx相关信息.
+    #   2. input分为两部分: workerInput和modelInput, workerInput主要是kv cache block idx切换信息相关, modelInput主要是token信息, 专门用于模型推理.
+    #   3. driver: 从ExecuteModelRequest中解析得到workerInput和modelInput, 然后broadcast给tp group.
+    #      sub: broadcast得到driver的workerInput和modelInput.
+    def prepare_input(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
+        """
+        Prepare the inputs to ModelRunner and workers.
+        """
+        if self.is_driver_worker:
+            if execute_model_req is None:
+                if self.do_metadata_broadcast:
+                    # This signals that there's no more requests to process for
+                    # now. All workers are running infinite loop with
+                    # broadcast_tensor_dict, and it stops the loop when the
+                    # driver broadcasts an empty input. Send an empty input to
+                    # notify all other workers to stop their execution loop.
+                    broadcast_tensor_dict({}, src=0)
+                return None
+            return self._get_driver_input_and_broadcast(execute_model_req)
+        else:
+            return self._get_worker_input_from_broadcast()
+
+    @property
+    @abstractmethod
+    def do_metadata_broadcast(self) -> bool:
+        """
+        Used by the default `execute_model` to check whether broadcast is
+        needed to transfer request inputs from the driver worker to other
+        workers in the TP group. If WorkerBase subclass only supports
+        single-worker execution, then this method should return False.
         """
         raise NotImplementedError
 
@@ -302,17 +336,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def execute_worker(self, worker_input: WorkerInput) -> None:
-        """
-        Process an execution request.
-        """
-        raise NotImplementedError
-
     def _get_worker_input_from_broadcast(
-        self
+            self
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
-            str, torch.Tensor]]]:
+        str, torch.Tensor]]]:
         """ Get the worker input from the broadcasted tensor dict. """
         assert self.do_metadata_broadcast
         assert not self.is_driver_worker
@@ -330,7 +357,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         return model_input, worker_input, kwargs
 
     def _get_driver_input_and_broadcast(
-        self, execute_model_req: ExecuteModelRequest
+            self, execute_model_req: ExecuteModelRequest
     ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
@@ -357,28 +384,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 async_callback=execute_model_req.async_callback)
 
         return model_input, worker_input, kwargs
-
-    def prepare_input(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
-            str, torch.Tensor]]]:
-        """
-        Prepare the inputs to ModelRunner and workers.
-        """
-        if self.is_driver_worker:
-            if execute_model_req is None:
-                if self.do_metadata_broadcast:
-                    # This signals that there's no more requests to process for
-                    # now. All workers are running infinite loop with
-                    # broadcast_tensor_dict, and it stops the loop when the
-                    # driver broadcasts an empty input. Send an empty input to
-                    # notify all other workers to stop their execution loop.
-                    broadcast_tensor_dict({}, src=0)
-                return None
-            return self._get_driver_input_and_broadcast(execute_model_req)
-        else:
-            return self._get_worker_input_from_broadcast()
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()

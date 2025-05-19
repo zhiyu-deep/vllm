@@ -233,26 +233,6 @@ class ExecutorBase(ABC):
     def __del__(self):
         self.shutdown()
 
-    # todo: worker status.
-    def stop_remote_worker_execution_loop(self) -> None:
-        """Releases parallel workers from model loop."""
-        return
-
-    async def stop_remote_worker_execution_loop_async(self) -> None:
-        """Releases parallel workers from model loop."""
-        return
-
-    async def check_health_async(self) -> None:
-        """Checks if the executor is healthy. If not, it should raise an
-        exception."""
-        self.check_health()
-
-    @abstractmethod
-    def check_health(self) -> None:
-        """Checks if the executor is healthy. If not, it should raise an
-        exception."""
-        raise NotImplementedError
-
     # todo: infer.
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
@@ -278,6 +258,25 @@ class ExecutorBase(ABC):
         """Executes one model step on the given sequences."""
         output = await make_async(self.execute_model)(execute_model_req)
         return output
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        """Releases parallel workers from model loop."""
+        return
+
+    async def stop_remote_worker_execution_loop_async(self) -> None:
+        """Releases parallel workers from model loop."""
+        return
+
+    async def check_health_async(self) -> None:
+        """Checks if the executor is healthy. If not, it should raise an
+        exception."""
+        self.check_health()
+
+    @abstractmethod
+    def check_health(self) -> None:
+        """Checks if the executor is healthy. If not, it should raise an
+        exception."""
+        raise NotImplementedError
 
 
 class DistributedExecutorBase(ExecutorBase):
@@ -317,43 +316,6 @@ class DistributedExecutorBase(ExecutorBase):
 
         # TODO: simplify and merge with collective_rpc
         """
-        raise NotImplementedError
-
-    # todo: worker status.
-    @abstractmethod
-    async def _start_worker_execution_loop(self):
-        """Run execution loop on all workers. It guarantees all workers run
-        the loop or None of them is running the loop. Loop can be stopped by
-        `stop_remote_worker_execution_loop`.
-        The API is idempotent (guarantee only 1 loop run at any moment)."""
-        raise NotImplementedError
-
-    def stop_remote_worker_execution_loop(self) -> None:
-        if self.parallel_worker_tasks is None:
-            return
-
-        self._driver_execute_model(execute_model_req=None)
-        parallel_worker_tasks = self.parallel_worker_tasks
-        self.parallel_worker_tasks = None
-        # Ensure that workers exit model loop cleanly
-        # (this will raise otherwise)
-        self._wait_for_tasks_completion(parallel_worker_tasks)
-
-    async def stop_remote_worker_execution_loop_async(self) -> None:
-        if self.parallel_worker_tasks is None:
-            return
-
-        await self._driver_execute_model_async()
-        parallel_worker_tasks = self.parallel_worker_tasks
-        self.parallel_worker_tasks = None
-        # Ensure that workers exit model loop cleanly
-        # (this will raise otherwise)
-        await parallel_worker_tasks
-
-    @abstractmethod
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
         raise NotImplementedError
 
     # todo: infer.
@@ -405,4 +367,40 @@ class DistributedExecutorBase(ExecutorBase):
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def _start_worker_execution_loop(self):
+        """Run execution loop on all workers. It guarantees all workers run
+        the loop or None of them is running the loop. Loop can be stopped by
+        `stop_remote_worker_execution_loop`.
+        The API is idempotent (guarantee only 1 loop run at any moment)."""
+        raise NotImplementedError
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        self._driver_execute_model(execute_model_req=None)
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        self._wait_for_tasks_completion(parallel_worker_tasks)
+
+    async def stop_remote_worker_execution_loop_async(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        await self._driver_execute_model_async()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        await parallel_worker_tasks
+
+    @abstractmethod
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
         raise NotImplementedError

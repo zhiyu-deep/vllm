@@ -182,13 +182,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                                       None)) is not None:
             worker_monitor.close()
 
-    # todo: worker status.
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
-        for result in parallel_worker_tasks:
-            result.get()
-
+    # todo: infer.
     async def _start_worker_execution_loop(self):
         coros = [
             worker.execute_method_async("start_worker_execution_loop")
@@ -196,7 +190,12 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         ]
         return await asyncio.gather(*coros)
 
-    # todo: infer.
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        for result in parallel_worker_tasks:
+            result.get()
+
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
     ) -> Optional[List[SamplerOutput]]:
