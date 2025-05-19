@@ -397,6 +397,10 @@ class GroupCoordinator:
                                                 group=self.device_group)
         return obj_list
 
+    # todo: 配套的cpu memory object send/recv.
+    #   1. 序列化cpu memory object.
+    #   2. cpu上发送对象大小信息.
+    #   3. cpu上发送cpu memory object字节流.
     def send_object(self, obj: Any, dst: int) -> None:
         """Send the input object list to the destination rank."""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -457,6 +461,7 @@ class GroupCoordinator:
         assert rank_object == rank_size, (
             "Received object sender rank does not match the size sender rank.")
 
+        # todo: object_tensor中是字节流, 从字节流反序列化得到obj.
         obj = pickle.loads(object_tensor.numpy().tobytes())
 
         return obj
@@ -546,6 +551,14 @@ class GroupCoordinator:
                 async_handle.wait()
         return tensor_dict
 
+    # todo: 配套, device memory发送.
+    #   1. device tensor, 解析成meta tensor(包含了device tensor size, dtype等信息).
+    #   2. send/recv meta tensor.
+    #   3. send/recv device tensor.
+    #   另外, 本接口考虑了all gather的情况:
+    #   p0 p1 p2 p3
+    #   p4 p5 p6 p7
+    #   即每个节点拥有完整的数据, 但是, 第一步: 按照tp的大小, p和p之间只传输1 / tp的数据, 第二步: tp之间汇总结果.
     def send_tensor_dict(
         self,
         tensor_dict: Dict[str, Union[torch.Tensor, Any]],
@@ -571,7 +584,6 @@ class GroupCoordinator:
             dst = (self.rank_in_group + 1) % self.world_size
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
-        metadata_list: List[Tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
             dict), f"Expecting a dictionary, got {type(tensor_dict)}"
@@ -622,6 +634,7 @@ class GroupCoordinator:
         group = self.device_group
         metadata_group = self.cpu_group
 
+        # todo: 默认从前序rank获取数据.
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
         assert src < self.world_size, f"Invalid src rank ({src})"

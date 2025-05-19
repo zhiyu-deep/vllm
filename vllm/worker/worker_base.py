@@ -488,6 +488,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         )
 
 
+# todo: 代表进程级别的worker, 1. 对worker运行环境进行管理, 2. 对worker初始化进行管理, 3. 功能代理.
 class WorkerWrapperBase:
     """
     This class represents one process in an executor/engine. It is responsible
