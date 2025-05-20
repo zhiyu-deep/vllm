@@ -41,7 +41,7 @@ class Result(Generic[T]):
     exception: Optional[BaseException] = None
 
 
-# todo: 提交任务的时候, 会返回一个future, 从future中等待结果.
+# todo: 提交任务的时候, 会返回一个future, 从future中等待结果; 此处是非async future(继承自threading.Event).
 class ResultFuture(threading.Event, Generic[T]):
     """Synchronous future for non-async case"""
 
@@ -54,7 +54,7 @@ class ResultFuture(threading.Event, Generic[T]):
         self.result = result
         self.set()
 
-    # todo: 消费者取得结果.
+    # todo: 消费者取得结果, 并解析结果.
     def get(self) -> T:
         self.wait()
         assert self.result is not None
