@@ -269,6 +269,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     model_runner: ModelRunnerBase
     observability_config: Optional[ObservabilityConfig] = None
 
+    #######################################################model########################################################
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
+
+    #######################################################kv cache#####################################################
     @property
     @abstractmethod
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
@@ -281,16 +286,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def execute_worker(self, worker_input: WorkerInput) -> None:
-        """
-        Process an execution request.
-        """
-        raise NotImplementedError
-
     # todo: prepare input.
     #   1. ExecuteModelRequest主要包含了schedule的结果, 包含了sequence上下文信息, 以及kv cache block idx相关信息.
-    #   2. input分为两部分: workerInput和modelInput, workerInput主要是kv cache block idx切换信息相关, modelInput主要是token信息, 专门用于模型推理.
+    #   2. input分为两部分: workerInput和modelInput, workerInput主要是kv cache block idx切换信息相关(由worker来执行), modelInput主要是token信息, 专门用于模型推理(由model来执行).
     #   3. driver: 从ExecuteModelRequest中解析得到workerInput和modelInput, 然后broadcast给tp group.
     #      sub: broadcast得到driver的workerInput和modelInput.
     def prepare_input(
@@ -385,8 +383,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         return model_input, worker_input, kwargs
 
-    def get_model(self) -> nn.Module:
-        return self.model_runner.get_model()
+    @abstractmethod
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        """
+        Process an execution request.
+        """
+        raise NotImplementedError
 
     def execute_model(
         self,

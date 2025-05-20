@@ -112,33 +112,6 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
-    def start_profile(self):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        self.profiler.start()
-
-    def stop_profile(self):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        self.profiler.stop()
-
-    def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
-        used_bytes = total - free_bytes_after_sleep
-        assert freed_bytes >= 0, "Memory usage increased after sleeping."
-        logger.info(
-            "Sleep mode freed %.2f GiB memory, "
-            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
-            used_bytes / GiB_bytes)
-
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        allocator = CuMemAllocator.get_instance()
-        allocator.wake_up(tags=tags)
-
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
@@ -181,25 +154,6 @@ class Worker(LocalOrDistributedWorkerBase):
             context = nullcontext()
         with context:
             self.model_runner.load_model()
-
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        self.model_runner.save_sharded_state(
-            path,
-            pattern=pattern,
-            max_size=max_size,
-        )
-
-    def save_tensorized_model(
-        self,
-        tensorizer_config: TensorizerConfig,
-    ) -> None:
-        self.model_runner.save_tensorized_model(
-            tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -282,6 +236,7 @@ class Worker(LocalOrDistributedWorkerBase):
             f"This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
+    # todo: kv cache初始化.
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
@@ -341,13 +296,10 @@ class Worker(LocalOrDistributedWorkerBase):
         set_random_seed(self.model_config.seed)
 
     @property
-    def do_metadata_broadcast(self) -> bool:
-        return self.parallel_config.tensor_parallel_size > 1
-
-    @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return self.gpu_cache
 
+    ####################################################prepare input###################################################
     @torch.inference_mode()
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
@@ -378,6 +330,11 @@ class Worker(LocalOrDistributedWorkerBase):
             num_steps=num_steps,
         )
 
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
+
+    #####################################################execute########################################################
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
         virtual_engine = worker_input.virtual_engine
@@ -450,6 +407,54 @@ class Worker(LocalOrDistributedWorkerBase):
         output = super()._execute_model_spmd(execute_model_req,
                                              intermediate_tensors)
         return output
+
+    ####################################################################################################################
+
+    def save_sharded_state(
+            self,
+            path: str,
+            pattern: Optional[str] = None,
+            max_size: Optional[int] = None,
+    ) -> None:
+        self.model_runner.save_sharded_state(
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
+    def save_tensorized_model(
+            self,
+            tensorizer_config: TensorizerConfig,
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()
+
+    def sleep(self, level: int = 1) -> None:
+        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+        allocator = CuMemAllocator.get_instance()
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+                                                used_bytes / GiB_bytes)
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        allocator = CuMemAllocator.get_instance()
+        allocator.wake_up(tags=tags)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
