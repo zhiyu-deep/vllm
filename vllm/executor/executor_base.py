@@ -318,11 +318,48 @@ class DistributedExecutorBase(ExecutorBase):
         """
         raise NotImplementedError
 
-    # todo: infer.
+    # todo: infer sync.
+    @abstractmethod
+    def _driver_execute_model(
+            self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
+        """Run execute_model in the driver worker.
+
+        Passing None will cause the driver to stop the model execution loop
+        running in each of the remote workers. In this case, this method
+        returns None. Otherwise, this method returns the model output.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        # todo: 在pp=1场景下, driver worker就是主线程(以串行的方式执行), non driver worker以future的方式执行,
+        #       本处提供了future的等待方式.
+
+        raise NotImplementedError
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        self._driver_execute_model(execute_model_req=None)
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        self._wait_for_tasks_completion(parallel_worker_tasks)
+
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
+        # todo: 在离线场景下, pp=1, 只有1个driver worker + non driver workers.
+        #   1. 让non driver worker先启动执行(循环状态), 会等待broadcast.
+        #   2. 让driver worker开始执行.
+        # todo: executor的output, 由driver返回; worker一直陷入等待状态, 需要通过stop_remote_worker_execution_loop暂停.
+
         # TODO: unify into collective_rpc
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
@@ -334,27 +371,13 @@ class DistributedExecutorBase(ExecutorBase):
         assert driver_outputs is not None
         return driver_outputs
 
-    async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        if self.parallel_worker_tasks is None:
-            # Start model execution loop running in the parallel workers
-            self.parallel_worker_tasks = asyncio.create_task(
-                self._start_worker_execution_loop())
-
-        # Only the driver worker returns the sampling results.
-        return await self._driver_execute_model_async(execute_model_req)
-
+    # todo: infer async.
     @abstractmethod
-    def _driver_execute_model(
-            self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
-        """Run execute_model in the driver worker.
-
-        Passing None will cause the driver to stop the model execution loop
-        running in each of the remote workers. In this case, this method
-        returns None. Otherwise, this method returns the model output.
-        """
+    async def _start_worker_execution_loop(self):
+        """Run execution loop on all workers. It guarantees all workers run
+        the loop or None of them is running the loop. Loop can be stopped by
+        `stop_remote_worker_execution_loop`.
+        The API is idempotent (guarantee only 1 loop run at any moment)."""
         raise NotImplementedError
 
     @abstractmethod
@@ -369,24 +392,16 @@ class DistributedExecutorBase(ExecutorBase):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    async def _start_worker_execution_loop(self):
-        """Run execution loop on all workers. It guarantees all workers run
-        the loop or None of them is running the loop. Loop can be stopped by
-        `stop_remote_worker_execution_loop`.
-        The API is idempotent (guarantee only 1 loop run at any moment)."""
-        raise NotImplementedError
-
-    def stop_remote_worker_execution_loop(self) -> None:
+    async def execute_model_async(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
-            return
+            # Start model execution loop running in the parallel workers
+            self.parallel_worker_tasks = asyncio.create_task(
+                self._start_worker_execution_loop())
 
-        self._driver_execute_model(execute_model_req=None)
-        parallel_worker_tasks = self.parallel_worker_tasks
-        self.parallel_worker_tasks = None
-        # Ensure that workers exit model loop cleanly
-        # (this will raise otherwise)
-        self._wait_for_tasks_completion(parallel_worker_tasks)
+        # Only the driver worker returns the sampling results.
+        return await self._driver_execute_model_async(execute_model_req)
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         if self.parallel_worker_tasks is None:
@@ -398,9 +413,3 @@ class DistributedExecutorBase(ExecutorBase):
         # Ensure that workers exit model loop cleanly
         # (this will raise otherwise)
         await parallel_worker_tasks
-
-    @abstractmethod
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
-        raise NotImplementedError

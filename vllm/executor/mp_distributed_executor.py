@@ -26,33 +26,6 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
     uses_ray: bool = False
 
-    def _check_cuda(self) -> None:
-        """Check that the number of GPUs is sufficient for the parallel
-        configuration. Separate from _init_executor to reduce the number of
-        indented blocks.
-        """
-        parallel_config = self.parallel_config
-        world_size = parallel_config.world_size
-        tensor_parallel_size = parallel_config.tensor_parallel_size
-
-        cuda_device_count = cuda_device_count_stateless()
-        # Use confusing message for more common TP-only case.
-        if tensor_parallel_size > cuda_device_count:
-            raise RuntimeError(
-                f"please set tensor_parallel_size ({tensor_parallel_size}) "
-                f"to less than max local gpu count ({cuda_device_count})")
-
-        if world_size > cuda_device_count:
-            raise RuntimeError(
-                f"please ensure that world_size ({world_size}) "
-                f"is less than than max local gpu count ({cuda_device_count})")
-
-        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
-        if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            update_environment_variables({
-                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
-            })
-
     # todo: 任务派发.
     def _run_workers(
             self,
@@ -88,7 +61,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 for worker in self.non_driver_workers
             ]
 
-        # todo: 非rank0+rank0执行, 非rank0执行是异步的, 所以需要output.get, rank0执行是同步的.
+        # todo: 非rank0+rank0执行.
         # Start all remote workers first.
         worker_outputs = [
             worker.execute_method(sent_method, *args, **kwargs)
@@ -97,11 +70,40 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         driver_worker_output = run_method(self.driver_worker, sent_method,
                                           args, kwargs)
 
+        # todo: run_workers是非异步的(因为worker.execute_method是async实现), 会造成等待.
+
         # Get the results of the workers.
         return [driver_worker_output
                 ] + [output.get() for output in worker_outputs]
 
     # todo: init.
+    def _check_cuda(self) -> None:
+        """Check that the number of GPUs is sufficient for the parallel
+        configuration. Separate from _init_executor to reduce the number of
+        indented blocks.
+        """
+        parallel_config = self.parallel_config
+        world_size = parallel_config.world_size
+        tensor_parallel_size = parallel_config.tensor_parallel_size
+
+        cuda_device_count = cuda_device_count_stateless()
+        # Use confusing message for more common TP-only case.
+        if tensor_parallel_size > cuda_device_count:
+            raise RuntimeError(
+                f"please set tensor_parallel_size ({tensor_parallel_size}) "
+                f"to less than max local gpu count ({cuda_device_count})")
+
+        if world_size > cuda_device_count:
+            raise RuntimeError(
+                f"please ensure that world_size ({world_size}) "
+                f"is less than than max local gpu count ({cuda_device_count})")
+
+        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            update_environment_variables({
+                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
+            })
+
     def _init_executor(self) -> None:
 
         from vllm.platforms import current_platform
@@ -177,27 +179,9 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         self.driver_exec_model = make_async(self.driver_worker.execute_model)
         self.pp_locks: Optional[List[asyncio.Lock]] = None
 
-    def shutdown(self):
-        if (worker_monitor := getattr(self, "worker_monitor",
-                                      None)) is not None:
-            worker_monitor.close()
-
-    # todo: infer.
-    async def _start_worker_execution_loop(self):
-        coros = [
-            worker.execute_method_async("start_worker_execution_loop")
-            for worker in self.non_driver_workers
-        ]
-        return await asyncio.gather(*coros)
-
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
-        for result in parallel_worker_tasks:
-            result.get()
-
+    # todo: infer sync.
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
+            self, execute_model_req: Optional[ExecuteModelRequest]
     ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
@@ -205,6 +189,21 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         loop running in each of the remote workers.
         """
         return self.driver_worker.execute_model(execute_model_req)
+
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        for result in parallel_worker_tasks:
+            result.get()
+
+    # todo: infer async.
+    async def _start_worker_execution_loop(self):
+        # todo: 让non driver worker先进入执行状态, 会卡在broadcast.
+        coros = [
+            worker.execute_method_async("start_worker_execution_loop")
+            for worker in self.non_driver_workers
+        ]
+        return await asyncio.gather(*coros)
 
     async def _driver_execute_model_async(
             self,
@@ -240,8 +239,14 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         # Only the last PP stage has the final results.
         return results[-1]
 
+    # todo: functionality.
     def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
         if self.worker_monitor is not None and not self.worker_monitor.is_alive(
         ):
             raise RuntimeError("Worker processes are not running")
+
+    def shutdown(self):
+        if (worker_monitor := getattr(self, "worker_monitor",
+                                      None)) is not None:
+            worker_monitor.close()
