@@ -104,16 +104,16 @@ class VocabParallelEmbeddingShardIndices:
                 self.padded_added_vocab_start_index)
 
     @property
+    def num_elements_padded(self) -> int:
+        return self.num_org_elements_padded + self.num_added_elements_padded
+
+    @property
     def num_org_vocab_padding(self) -> int:
         return self.num_org_elements_padded - self.num_org_elements
 
     @property
     def num_added_vocab_padding(self) -> int:
         return self.num_added_elements_padded - self.num_added_elements
-
-    @property
-    def num_elements_padded(self) -> int:
-        return self.num_org_elements_padded + self.num_added_elements_padded
 
     def __post_init__(self):
         # sanity checks
@@ -247,6 +247,7 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+
         # Divide the weight matrix along the vocaburaly dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         self.num_embeddings_per_partition = divide(self.num_embeddings_padded,

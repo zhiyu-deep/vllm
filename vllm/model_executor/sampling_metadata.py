@@ -247,7 +247,7 @@ def _prepare_seq_groups(
     # Used for selected_token_indices.
     model_output_idx = 0
 
-    # todo: prune logits中, 其中一部分需要进行sample, 按照sampleType进行分类, 每个具体的sampleType对应index列表(表示每个token在pruned矩阵中的索引).
+    # todo: prune logits中, 其中一部分需要进行sample, 按照sampleType进行分类, 每个具体的sampleType对应index列表(表示每个token在pruned logits矩阵中的索引).
     # Sampling type -> (indices to sample within pruned logits)
     categorized_sample_indices: Dict[SamplingType, List[int]] = {
         t: []
@@ -324,7 +324,6 @@ def _prepare_seq_groups(
         hidden_states = model(...)
         logits = hidden_states[selected_token_indices]
         """
-
         if sampling_params.prompt_logprobs is not None:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + prompt_logprob_len))
@@ -346,7 +345,6 @@ def _prepare_seq_groups(
            # prompt_logprob_indices to find prompt logprob indices.
            # sample_indices to find sample indices.
         """
-
         if sampling_params.prompt_logprobs is not None:
             prompt_logprob_indices.extend(
                 range(logit_idx, logit_idx + prompt_logprob_len))
