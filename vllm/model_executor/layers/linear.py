@@ -167,6 +167,10 @@ class LinearMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
+# todo: 特定的quant方式:
+#   1. 基于给定的sharded shape信息, 生成quant weight矩阵;
+#   2. 为quant weight设置属性信息, 并且将quant weight注册到layer中.
+#   3. 基于quant weight, 为layer完成forward计算.
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
@@ -337,6 +341,10 @@ class ColumnParallelLinear(LinearBase):
     The linear layer is defined as Y = XA + b. A is parallelized along
     its second dimension as A = [A_1, ..., A_p].
 
+    todo(jiang):
+        1. X是input, A是weight(input_size, output_size), ColumnParallel算法在output_size维度上切分;
+        2. allGather: 每个rank的结果是汇总的结果[A_1, A_2, ..., A_p], not allGather: 每个rank的结果是当前结果[A_i];
+
     Args:
         input_size: first dimension of matrix A.
         output_size: second dimension of matrix A.
@@ -369,6 +377,14 @@ class ColumnParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
     ):
+        super().__init__(input_size,
+                         output_size,
+                         skip_bias_add,
+                         params_dtype,
+                         quant_config,
+                         prefix,
+                         return_bias=return_bias)
+
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = input_size
@@ -380,14 +396,6 @@ class ColumnParallelLinear(LinearBase):
                 divide(output_size, self.tp_size)
                 for output_size in self.output_sizes
             ]
-
-        super().__init__(input_size,
-                         output_size,
-                         skip_bias_add,
-                         params_dtype,
-                         quant_config,
-                         prefix,
-                         return_bias=return_bias)
 
         self.gather_output = gather_output
 
@@ -420,6 +428,7 @@ class ColumnParallelLinear(LinearBase):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
 
+        # todo: shareded表示weight在外面已经切割好了, 内部不用切割.
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         # bitsandbytes loads the weights of the specific portion
@@ -811,9 +820,12 @@ class QKVParallelLinear(ColumnParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
+
         self.num_heads = divide(self.total_num_heads, tp_size)
+
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
             self.num_kv_head_replicas = divide(tp_size,
@@ -821,6 +833,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         else:
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
+
         input_size = self.hidden_size
         output_size = (self.num_heads +
                        2 * self.num_kv_heads) * tp_size * self.head_size
@@ -830,6 +843,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * self.head_size * tp_size,  # v_proj 
         ]
 
+        # todo: 将qkv融合到一起交给
         super().__init__(input_size=input_size,
                          output_size=output_size,
                          bias=bias,
@@ -1083,7 +1097,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                      shard_size)
-
         # Special case for for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -1147,13 +1160,6 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
     ):
-        # Divide the weight matrix along the first dimension.
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.tp_size)
-        self.output_size_per_partition = output_size
-        self.output_partition_sizes = [output_size]
-
         super().__init__(input_size,
                          output_size,
                          skip_bias_add,
@@ -1161,6 +1167,13 @@ class RowParallelLinear(LinearBase):
                          quant_config,
                          prefix,
                          return_bias=return_bias)
+
+        # Divide the weight matrix along the first dimension.
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
