@@ -38,13 +38,20 @@ class SequenceGroupToSample:
     # prefill is enabled.
     query_len: Optional[int]
     # A random number generator for sampling.
-    generator: Optional[torch.Generator]
+    generator: Optional[torch.Generator]  # todo: 一个request对应一个generator.
     # True if the sequence group is in prefill stage. False if it is in a
     # decode stage.
     is_prompt: bool
+
+    # todo: infer request batch从前往后分为prefill seqGroup和decode seqGroup, seqGroup的tokens合并成logit矩阵(output from model);
+    #       logits矩阵中根据解码选项分为: prompt logprob tokens和sample tokens;
+    #       进行prune得到pruned logits.
+
+    # todo: 表示当前seqGroup, 需要计算prompt_logprob_tokens在pruned logits矩阵中的索引信息.
     # Query token indices from logits. to compute prompt logprob. Empty if
     # prompt logprob is not required.
     prompt_logprob_indices: List[int]
+    # todo: 表示当前seqGroup, 需要sample tokens在pruned logits矩阵中的索引信息.
     # Sample token indices from logits. Empty if sampling is not required.
     sample_indices: List[int]
 
@@ -60,6 +67,7 @@ class SequenceGroupToSample:
             assert self.query_len is not None
 
 
+# todo: 根据num_seqs大小, 开辟一个SequenceGroupToSample空间.
 def gen_seq_group_to_sample_builder(num_seqs: int):
     return lambda: SequenceGroupToSample(
         seq_ids=[0] * num_seqs,
@@ -80,6 +88,7 @@ class SamplingMetadataCache:
     def __init__(self):
         self._seq_group_to_sample_cache: Dict[int, PyObjectCache] = {}
 
+    # todo: 每个iteration一共有很多seqGroup, 按照seqGroup中seqs个数进行分类, 每个具体num_seqs对应一个seqGroup对象池.
     def get_cached_seq_group_to_sample(self, num_seqs):
         if num_seqs not in self._seq_group_to_sample_cache:
             self._seq_group_to_sample_cache[num_seqs] = PyObjectCache(
@@ -199,7 +208,7 @@ def _prepare_seq_groups(
     seq_lens: List[int],
     query_lens: List[int],
     device: str,
-    generators: Optional[Dict[str, torch.Generator]] = None,
+    generators: Optional[Dict[str, torch.Generator]] = None,  # todo: {request_id: generator}, 1个request对应1个generator; 对于prefill seqGroup, 会保存进去一个generator.
     cache: Optional[SamplingMetadataCache] = None,
 ) -> Tuple[
         List[SequenceGroupToSample],
@@ -228,15 +237,18 @@ def _prepare_seq_groups(
     """
     # Batched sequence groups for the current model forward stsep.
     seq_groups: List[SequenceGroupToSample] = []
+    # Total number of prompts from given sequence groups.
+    num_prompts = 0
+
+    # todo: logits矩阵中不一定所有tokens都需要处理, 通过prune得到pruned logits, 只选取prompt log probs tokens和sample tokens.
     # A list of token indices to sample/compute logprob. It is used to
     # prune the outcome logits from the model for the performance.
     selected_token_indices: List[int] = []
     # Used for selected_token_indices.
     model_output_idx = 0
 
-    # Sampling type -> (
-    # indices to sample/prompt logprob within pruned output logits,
-    # indices to sample within pruned logits)
+    # todo: prune logits中, 其中一部分需要进行sample, 按照sampleType进行分类, 每个具体的sampleType对应index列表(表示每个token在pruned logits矩阵中的索引).
+    # Sampling type -> (indices to sample within pruned logits)
     categorized_sample_indices: Dict[SamplingType, List[int]] = {
         t: []
         for t in SamplingType
@@ -244,8 +256,6 @@ def _prepare_seq_groups(
     # Index of logits to compute logprob. Logits include both prompt logprob
     # and sample logprob indices.
     logit_idx = 0
-    # Total number of prompts from given sequence groups.
-    num_prompts = 0
 
     for i, seq_group_metadata in enumerate(seq_group_metadata_list):
         seq_ids = seq_group_metadata.seq_data.keys()
@@ -262,13 +272,19 @@ def _prepare_seq_groups(
         sampling_params = seq_group_metadata.sampling_params
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
+
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
+
         query_len: Optional[int] = None
+
+        # todo: 对于当前seqGroup, prompt logProb tokens在pruned logits中的索引.
         prompt_logprob_indices: List[int] = (sample_obj.prompt_logprob_indices
                                              if cache is not None else [])
+        # todo: 对于当前seqGroup, sample tokens在pruned logits中的索引.
         sample_indices: List[int] = (sample_obj.sample_indices
                                      if cache is not None else [])
+
         do_sample = seq_group_metadata.do_sample
 
         if seq_group_metadata.is_prompt:
@@ -283,6 +299,7 @@ def _prepare_seq_groups(
             assert num_prefill_sample == 1
             assert query_lens is not None and seq_lens is not None
             query_len, seq_len = query_lens[i], seq_lens[i]
+            # todo: prefill中, 长为query_len的prompts, [0:query_len - 1]是logprob部分, [query_len - 1:]是sample部分.(也就是prompt中最后一个token是sample, 其余的是计算logprob).
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
             prompt_logprob_len = (query_len - num_prefill_sample
@@ -293,6 +310,7 @@ def _prepare_seq_groups(
             prompt_logprob_len = 0
             query_len = query_lens[i] if query_lens is not None and len(
                 query_lens) > 0 else 1
+            # todo: 对于decode batch, batch内有k个句子, 每个句子解码query_len, sample_len=query_len * seqs_num.
             sample_len = len(seq_ids) * query_len if do_sample else 0
 
             if sampling_params.seed is not None and generators is not None:
@@ -306,7 +324,6 @@ def _prepare_seq_groups(
         hidden_states = model(...)
         logits = hidden_states[selected_token_indices]
         """
-
         if sampling_params.prompt_logprobs is not None:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + prompt_logprob_len))
@@ -328,15 +345,15 @@ def _prepare_seq_groups(
            # prompt_logprob_indices to find prompt logprob indices.
            # sample_indices to find sample indices.
         """
-
         if sampling_params.prompt_logprobs is not None:
             prompt_logprob_indices.extend(
                 range(logit_idx, logit_idx + prompt_logprob_len))
             logit_idx += prompt_logprob_len
         if do_sample:
-            sample_indices.extend(range(logit_idx, logit_idx + sample_len))
             categorized_sample_indices[sampling_params.sampling_type].extend(
                 list(range(logit_idx, logit_idx + sample_len)))
+
+            sample_indices.extend(range(logit_idx, logit_idx + sample_len))
             logit_idx += sample_len
 
         if cache is not None:

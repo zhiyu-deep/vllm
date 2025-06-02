@@ -370,6 +370,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         return (lru_key, value)
 
 
+# todo: 针对一类对象(obj_builder产生的), 预分配一定个数, 使用的时候直接取; 也就是该对象池.
 class PyObjectCache:
     """Used to cache python objects to avoid object allocations
     across scheduler iterations.
