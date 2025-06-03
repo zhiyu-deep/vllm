@@ -194,6 +194,11 @@ class ModelRunnerBase(ABC, Generic[T]):
     generators: Dict[str, torch.Generator] = {}
 
     @abstractmethod
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
+    #####################################################prepare model input############################################
+    @abstractmethod
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],
@@ -218,10 +223,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_model(self) -> nn.Module:
-        raise NotImplementedError
-
+    ######################################################execute#######################################################
     def execute_model(
         self,
         model_input: T,
@@ -235,6 +237,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
+    ######################################################output########################################################
     def get_generators(self, finished_request_ids: Optional[List[str]] = None):
         """
         Return dict of per-request generators used for random sampling.

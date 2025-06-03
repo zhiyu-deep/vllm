@@ -286,6 +286,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
+    ######################################################prepare input#################################################
     # todo: prepare input.
     #   1. ExecuteModelRequest主要包含了schedule的结果, 包含了sequence上下文信息, 以及kv cache block idx相关信息.
     #   2. input分为两部分: workerInput和modelInput, workerInput主要是kv cache block idx切换信息相关(由worker来执行), modelInput主要是token信息, 专门用于模型推理(由model来执行).
@@ -383,6 +384,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         return model_input, worker_input, kwargs
 
+    ######################################################executing#####################################################
     @abstractmethod
     def execute_worker(self, worker_input: WorkerInput) -> None:
         """
