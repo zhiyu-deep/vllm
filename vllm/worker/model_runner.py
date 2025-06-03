@@ -409,8 +409,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             is_prompt=True,
             block_tables=None,
             computed_block_nums=[])
-
-    # todo: 在已经malloc对象的基础上进行初始化.
+    # todo: 获取cached InterDataForSeqGroup对象.
     def init_cached_inter_data(self, *args, **kwargs):
         assert len(args) == 0
         assert "seq_ids" in kwargs
@@ -426,7 +425,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         obj = inter_data_cache[num_seqs].get_object()
         obj.__init__(*args, **kwargs)
         return obj
-
     def reset_cached_inter_data(self):
         for cache in self.runner.inter_data_cache.values():
             cache.reset()
@@ -477,6 +475,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
 
+    # todo: builder开始build前进行初始化.
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
         self.finished_requests_ids = finished_requests_ids
@@ -491,7 +490,41 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             ModelInputForGPUBuilder.InterDataForSeqGroup] = []
 
         self.attn_metadata_builder.prepare()
+    # todo: 往builder中添加seq group信息.
+    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
+        """Add a sequence group to the builder."""
+        seq_ids = seq_group_metadata.seq_data.keys()
+        n_seqs = len(seq_ids)
+        is_prompt = seq_group_metadata.is_prompt
 
+        if is_prompt:
+            assert n_seqs == 1
+            self.decode_only = False
+
+        encoder_seq_len = 0
+
+        if self.runner.model_config.is_encoder_decoder:
+            encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
+
+        inter_data = self.init_cached_inter_data(
+            request_id=seq_group_metadata.request_id,
+            seq_ids=seq_ids,
+            is_prompt=is_prompt,
+            block_tables=seq_group_metadata.block_tables,
+            computed_block_nums=seq_group_metadata.computed_block_nums,
+            reinit=True,
+            reinit_use_defaults=True,
+            encoder_seq_len=encoder_seq_len)
+
+        self.inter_data_list.append(inter_data)
+
+        for seq_idx in range(n_seqs):
+            for per_seq_fn in self.per_seq_compute_fns:
+                per_seq_fn(inter_data, seq_idx, seq_group_metadata)
+        for per_seq_group_fn in self.per_seq_group_compute_fns:
+            per_seq_group_fn(inter_data, seq_group_metadata)
+
+    ####################################################deal functions##################################################
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
         """Compute context length, sequence length and tokens
@@ -728,40 +761,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_data.mrope_position_delta = mrope_position_delta
                 inter_data.mrope_input_positions[
                     seq_idx] = mrope_input_positions
-
-    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
-        """Add a sequence group to the builder."""
-        seq_ids = seq_group_metadata.seq_data.keys()
-        n_seqs = len(seq_ids)
-        is_prompt = seq_group_metadata.is_prompt
-
-        if is_prompt:
-            assert n_seqs == 1
-            self.decode_only = False
-
-        encoder_seq_len = 0
-
-        if self.runner.model_config.is_encoder_decoder:
-            encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
-
-        # todo: 从cache中取得的InterDataForSeqGroup, 并且往里init了seqGroup的初始值.
-        inter_data = self.init_cached_inter_data(
-            request_id=seq_group_metadata.request_id,
-            seq_ids=seq_ids,
-            is_prompt=is_prompt,
-            block_tables=seq_group_metadata.block_tables,
-            computed_block_nums=seq_group_metadata.computed_block_nums,
-            reinit=True,
-            reinit_use_defaults=True,
-            encoder_seq_len=encoder_seq_len)
-
-        self.inter_data_list.append(inter_data)
-
-        for seq_idx in range(n_seqs):
-            for per_seq_fn in self.per_seq_compute_fns:
-                per_seq_fn(inter_data, seq_idx, seq_group_metadata)
-        for per_seq_group_fn in self.per_seq_group_compute_fns:
-            per_seq_group_fn(inter_data, seq_group_metadata)
 
     def _use_captured_graph(self,
                             batch_size: int,

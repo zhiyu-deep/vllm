@@ -1074,17 +1074,19 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
         # todo:
+        #  x: latent vec, [B, Lq].                1536 in DSV3
         #  P: nope dimension, no rope.            128 in DSV3
         #  R: rope dimension, goes through rope.  64 in DSV3
         #  qk_head_dim = P + R
-        #  流程: q_c[Sq, Lq] -> q_nope|q_pe[Sq, num_heads, qk_head_dim]
+
+        #  todo: 1. x[B, Lq] -> (q_nope|q_pe)[B, num_heads, qk_head_dim] -> q_nope[B, num_heads, P], q_pre[B, num_heads, R]
         q_nope, q_pe = self.q_proj(x)[0]\
             .view(-1, self.num_heads, self.qk_head_dim)\
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
-        # todo: 将heads q映射到latent空间.
+        # todo: 2. 将q_nope[B, num_heads, P] project到kv latent空间[B, num_heads, Lkv].
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
@@ -1350,9 +1352,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def forward(
         self,
         layer: AttentionLayer,
-        hidden_states_or_q_c: torch.Tensor,  # query in unified attn
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
+        hidden_states_or_q_c: torch.Tensor,  # query in unified attn, todo: 在mla场景下, 代表q_c[B, Lq].
+        k_c_normed: torch.Tensor,  # key in unified attn              todo: 在mla场景下, 代表k_c[B, Lkv].
+        k_pe: torch.Tensor,  # value in unified attn                  todo: 在mla场景下, 代表k_pe[B, R].
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
