@@ -112,6 +112,7 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
+    #######################################################meta info####################################################
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
@@ -236,7 +237,6 @@ class Worker(LocalOrDistributedWorkerBase):
             f"This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-    # todo: kv cache初始化.
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
