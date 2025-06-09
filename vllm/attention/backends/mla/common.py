@@ -1096,7 +1096,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
-    # todo: 将kv的head project矩阵的数据类型转为activation type, 并且split为k和v两部分.
+    # todo:
+    #   1. 将kv的head project矩阵的数据类型转为activation type, 并且split为k和v两部分.
+    #   2. 因为self.kv_b_proj已经是columnParallel, 每个tp获得partHeads对应的权重, 所以直接从self.kv_b_proj.weight中获取内容即可.
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
         def get_layer_weight(layer):

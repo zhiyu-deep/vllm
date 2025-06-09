@@ -378,9 +378,10 @@ class DeepseekV2MLAAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         # todo: 并发设计上:
-        #   1. hiddenState-(columnParallel)->q[B, localHeads, Lkv]
-        #   2. attn(q, kvCache)
-        #   3. v[B, localHeads, vHeadDim]
+        #   1. hiddenState-(columnParallel)->q[B, localHeads, Lkv], 后续计算都在localHeads上进行:
+        #      1.1 attn(q localHeads, kvCache);
+        #      1.2 kv_b_proj也是一个columnMajor的, 用来在localHeads维度上进行kv多头空间的映射;
+        #   2. o_proj是rowParallel, 和localHeads计算后再scatter到所有tp(reduceScatter).
 
         # todo:
         #   1. q_lora_rank is not None, 代表需要转为q latent:                 hiddenState ---q_a---> q_c[B, q_lora_rank]
