@@ -1065,33 +1065,38 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        # todo: 将v latent, project到多头空间[B, heads, v_head_dim].
         # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
         x = torch.bmm(x, self.W_UV)
         # Convert from (N, B, V) to (B, N * V)
         x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+
+        # todo: 将v多头矩阵重新映射到hiddenSize空间[B, hiddenSize].
         return self.o_proj(x)[0]
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
         # todo:
-        #  x: latent vec, [B, Lq].                1536 in DSV3
+        #  x: hidden state, [B, Dim].             q_lora_rank ? q_lora_dim : hiddenSize
         #  P: nope dimension, no rope.            128 in DSV3
         #  R: rope dimension, goes through rope.  64 in DSV3
         #  qk_head_dim = P + R
 
-        #  todo: 1. x[B, Lq] -> (q_nope|q_pe)[B, num_heads, qk_head_dim] -> q_nope[B, num_heads, P], q_pre[B, num_heads, R]
+        #  todo: x[B, Dim] -> (q_nope|q_pe)[B, num_heads, qk_head_dim] -> q_nope[B, num_heads, P], q_pre[B, num_heads, R]
         q_nope, q_pe = self.q_proj(x)[0]\
             .view(-1, self.num_heads, self.qk_head_dim)\
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
-        # todo: 2. 将q_nope[B, num_heads, P] project到kv latent空间[B, num_heads, Lkv].
+
+        # todo: 将q_nope[B, num_heads, P] project到kv latent空间[B, num_heads, Lkv].
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
+    # todo: 将kv的head project矩阵的数据类型转为activation type, 并且split为k和v两部分.
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
         def get_layer_weight(layer):
@@ -1352,7 +1357,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def forward(
         self,
         layer: AttentionLayer,
-        hidden_states_or_q_c: torch.Tensor,  # query in unified attn, todo: 在mla场景下, 代表q_c[B, Lq].
+        hidden_states_or_q_c: torch.Tensor,  # query in unified attn, todo: 在mla场景下, 代表q_c[B, hiddenSize? Lq?].
         k_c_normed: torch.Tensor,  # key in unified attn              todo: 在mla场景下, 代表k_c[B, Lkv].
         k_pe: torch.Tensor,  # value in unified attn                  todo: 在mla场景下, 代表k_pe[B, R].
         kv_cache: torch.Tensor,
@@ -1395,9 +1400,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             attn_metadata.input_positions[:num_prefill_tokens]
         prefill_k_c_normed = k_c_normed[:num_prefill_tokens]
 
-        # todo: rotary_emb负责对q方向和k方向的Sq tokens进行embedding.
         if has_decode:
-            # todo: decode_ql_nope[Sq, N, Lkv], decode_q_pe[Sq, N, R]
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(

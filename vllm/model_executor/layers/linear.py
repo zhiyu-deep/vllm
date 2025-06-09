@@ -242,6 +242,9 @@ class LinearBase(torch.nn.Module):
         raise NotImplementedError
 
 
+# todo:
+#   1. replicate代表tp group中每个worker会重复计算一遍;
+#   2. ReplicatedLinear其实完成的就是基本gemm的操作(可能发生量化);
 class ReplicatedLinear(LinearBase):
     """Replicated linear layer.
 
@@ -346,7 +349,7 @@ class ColumnParallelLinear(LinearBase):
         2. allGather: 每个rank的结果是汇总的结果[A_1, A_2, ..., A_p], not allGather: 每个rank的结果是当前结果[A_i];
 
     Args:
-        input_size: first dimension of matrix A.
+        input_size: first dimension of matrix A.    # todo: input_size和output_size指代当前gemm总的problem size(output_size可能由多个部分组成, 即output_sizes)
         output_size: second dimension of matrix A.
         bias: If true, add bias.
         gather_output: If true, call all-gather on output and make Y available
@@ -389,6 +392,7 @@ class ColumnParallelLinear(LinearBase):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
+
         self.output_partition_sizes = [self.output_size_per_partition]
         # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
@@ -537,6 +541,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
     ):
         self.output_sizes = output_sizes
+
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         super().__init__(input_size=input_size,

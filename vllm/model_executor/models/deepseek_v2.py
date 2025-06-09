@@ -357,11 +357,14 @@ class DeepseekV2MLAAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+
+        # todo: 代表qkv转为多头后, 每个head dim.
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
 
+        # todo: 代表q和kv的latent dim.
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
 
@@ -374,6 +377,15 @@ class DeepseekV2MLAAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
+        # todo: 并发设计上:
+        #   1. hiddenState-(columnParallel)->q[B, localHeads, Lkv]
+        #   2. attn(q, kvCache)
+        #   3. v[B, localHeads, vHeadDim]
+
+        # todo:
+        #   1. q_lora_rank is not None, 代表需要转为q latent:                 hiddenState ---q_a---> q_c[B, q_lora_rank]
+        #   2. q_lora_rank is None, 代表不需要转为q latent, 直接用hiddenState: hiddenState --> hiddenState[B, hiddenSize]
+        # todo: 使用q_proj将q latent project到多头形态[B, numHeads, qk_head_dim]
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
                                              self.q_lora_rank,
@@ -396,6 +408,7 @@ class DeepseekV2MLAAttention(nn.Module):
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.q_proj")
 
+        # todo: 将hiddenState转为kv latent[B, 1, kv_lora_rank + qk_rope_head_dim].
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
@@ -404,12 +417,15 @@ class DeepseekV2MLAAttention(nn.Module):
             prefix=f"{prefix}.kv_a_proj_with_mqa")
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
+        # todo: 将kv latent project到多头形态[B, num_heads, qk_nope_head_dim + v_head_dim].
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
+
+        # todo: 将多头形态的v project到hiddenSize.
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
                                         bias=False,
@@ -466,14 +482,17 @@ class DeepseekV2MLAAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # todo: 得到q latent, kv latent, kv rope; 将三者当作qkv传入mla接口.
         if self.q_lora_rank is not None:
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
+
         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+
         return self.mla_attn(hidden_states_or_q_c,
                              kv_c_normed,
                              k_pe,
