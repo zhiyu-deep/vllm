@@ -80,6 +80,8 @@ class WorkerBase:
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
+    # todo: non-driver worker以死循环的方式等待执行模型推理(不会给non-driver worker传递ExecutionRequest, 而是通信的方式从driver worker处获得model input);
+    #       传递None input的方式使其停止运行.
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.
 
@@ -269,11 +271,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     model_runner: ModelRunnerBase
     observability_config: Optional[ObservabilityConfig] = None
 
-    #######################################################model########################################################
+    #######################################################meta info####################################################
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    #######################################################kv cache#####################################################
     @property
     @abstractmethod
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
@@ -286,7 +287,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
-    ######################################################prepare input#################################################
+    #####################################################prepare model input############################################
     # todo: prepare input.
     #   1. ExecuteModelRequest主要包含了schedule的结果, 包含了sequence上下文信息, 以及kv cache block idx相关信息.
     #   2. input分为两部分: workerInput和modelInput, workerInput主要是kv cache block idx切换信息相关(由worker来执行), modelInput主要是token信息, 专门用于模型推理(由model来执行).
