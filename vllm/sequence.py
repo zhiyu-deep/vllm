@@ -646,7 +646,7 @@ class SequenceGroup:
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
-        priority: User-defined priority of the request.
+        priority: User-defined priority of the request.    # todo: 手动指定当前request的优先级.
         draft_size: The number of speculative tokens plus one from the target 
                     model; equal to max number of tokens a step can generate
                     for single-draft speculative decoding but larger than 

@@ -206,6 +206,7 @@ class LLMEngine:
 
     tokenizer: Optional[BaseTokenizerGroup]
 
+    ##########################################################init######################################################
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -273,7 +274,6 @@ class LLMEngine:
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
-
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             self.model_config)
@@ -524,6 +524,7 @@ class LLMEngine:
             stat_loggers=stat_loggers,
             disable_log_stats=engine_args.disable_log_stats,
         )
+    ##########################################################init######################################################
 
     def __reduce__(self):
         # This is to ensure that the LLMEngine is not referenced in
@@ -576,6 +577,185 @@ class LLMEngine:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
+    ################################################from tokens to seqGroup#############################################
+    def _validate_model_inputs(self, inputs: ProcessorInputs,
+                               lora_request: Optional[LoRARequest]):
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
+
+        # For encoder-decoder multimodal models, the max_prompt_len
+        # restricts the decoder prompt length
+        if self.model_config.is_multimodal_model:
+            prompt_inputs = decoder_inputs
+        else:
+            prompt_inputs = encoder_inputs or decoder_inputs
+
+        prompt_ids = prompt_inputs["prompt_token_ids"]
+
+        if prompt_ids is None or len(prompt_ids) == 0:
+            raise ValueError("Prompt cannot be empty")
+
+        if self.model_config.is_multimodal_model:
+            max_prompt_len = self.model_config.max_model_len
+
+            if len(prompt_ids) > max_prompt_len:
+                raise ValueError(
+                    f"The prompt (total length {len(prompt_ids)}) is too long "
+                    f"to fit into the model (context length {max_prompt_len}). "
+                    "Make sure that `max_model_len` is no smaller than the "
+                    "number of text tokens plus multimodal tokens. For image "
+                    "inputs, the number of image tokens depends on the number "
+                    "of images, and possibly their aspect ratios as well.")
+
+            # TODO: Find out how many placeholder tokens are there so we can
+            # check that chunked prefill does not truncate them
+            # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _build_logits_processors(
+            self, sampling_params: SamplingParams,
+            lora_request: Optional[LoRARequest]) -> SamplingParams:
+        """Constructs logits processors based on the guided_decoding,
+        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+        those fields and adds the constructed logits processors to the
+        logits_processors field. Returns the modified sampling params."""
+
+        logits_processors = []
+
+        if sampling_params.guided_decoding is not None:
+            # Defensively copy sampling params since guided decoding logits
+            # processors can have different state for each request
+            sampling_params = copy.copy(sampling_params)
+            guided_decoding = sampling_params.guided_decoding
+
+            logger.debug(
+                "Building guided decoding logits processor in "
+                "LLMEngine. Params: %s", guided_decoding)
+
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+            guided_decoding.backend = guided_decoding.backend or \
+                                      self.decoding_config.guided_decoding_backend
+
+            if self.decoding_config.reasoning_backend is not None:
+                logger.debug("Building with reasoning backend %s",
+                             self.decoding_config.reasoning_backend)
+
+            processor = get_local_guided_decoding_logits_processor(
+                guided_params=guided_decoding,
+                tokenizer=tokenizer,
+                model_config=self.model_config,
+                reasoning_backend=self.decoding_config.reasoning_backend,
+            )
+            if processor:
+                logits_processors.append(processor)
+
+            # Unset so this doesn't get passed down to the model
+            sampling_params.guided_decoding = None
+
+        if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+
+            processors = get_openai_logits_processors(
+                logit_bias=sampling_params.logit_bias,
+                allowed_token_ids=sampling_params.allowed_token_ids,
+                tokenizer=tokenizer)
+            logits_processors.extend(processors)
+
+            # Unset so these don't get passed down to the model
+            sampling_params.logit_bias = None
+            sampling_params.allowed_token_ids = None
+
+        if len(sampling_params.bad_words) > 0:
+            tokenizer = self.get_tokenizer(lora_request)
+            processors = get_bad_words_logits_processors(
+                bad_words=sampling_params.bad_words, tokenizer=tokenizer)
+            logits_processors.extend(processors)
+
+        if logits_processors:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = logits_processors
+            else:
+                sampling_params.logits_processors.extend(logits_processors)
+
+        return sampling_params
+
+    def _create_sequence_group_with_sampling(
+            self,
+            request_id: str,
+            seq: Sequence,
+            sampling_params: SamplingParams,
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            encoder_seq: Optional[Sequence] = None,
+            priority: int = 0,
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with SamplingParams."""
+        max_logprobs = self.get_model_config().max_logprobs
+        if (sampling_params.logprobs
+            and sampling_params.logprobs > max_logprobs) or (
+                sampling_params.prompt_logprobs
+                and sampling_params.prompt_logprobs > max_logprobs):
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs.")
+
+        # todo:
+        #   1. 基于sampling_params中的要求, 构建特定的logits processor.
+        #   2. 更新sampling_params中内容.
+        sampling_params = self._build_logits_processors(
+            sampling_params, lora_request)
+
+        # Defensive copy of SamplingParams, which are used by the sampler,
+        # this doesn't deep-copy LogitsProcessor objects
+        sampling_params = sampling_params.clone()
+
+        sampling_params.update_from_generation_config(
+            self.generation_config_fields, seq.eos_token_id)
+
+        # Create the sequence group.
+        draft_size = 1
+        if self.vllm_config.speculative_config is not None:
+            draft_size = \
+                self.vllm_config.speculative_config.num_speculative_tokens + 1
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq,
+            priority=priority,
+            draft_size=draft_size)
+
+        return seq_group
+
+    def _create_sequence_group_with_pooling(
+            self,
+            request_id: str,
+            seq: Sequence,
+            pooling_params: PoolingParams,
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            prompt_adapter_request: Optional[PromptAdapterRequest],
+            encoder_seq: Optional[Sequence] = None,
+            priority: int = 0,
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with PoolingParams."""
+        # Defensive copy of PoolingParams, which are used by the pooler
+        pooling_params = pooling_params.clone()
+        # Create the sequence group.
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq,
+            priority=priority)
+        return seq_group
+
     def _add_processed_request(
         self,
         request_id: str,
@@ -612,6 +792,7 @@ class LLMEngine:
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
+        # todo: 构建Sequence(可能额外构建encoder Sequence).
         seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
 
@@ -655,9 +836,6 @@ class LLMEngine:
 
         return seq_group
 
-    def stop_remote_worker_execution_loop(self) -> None:
-        self.model_executor.stop_remote_worker_execution_loop()
-
     @overload
     def add_request(
         self,
@@ -687,6 +865,27 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
         ...
+
+    def _validate_token_prompt(self, prompt: PromptType,
+                               tokenizer: AnyTokenizer):
+        # Guard against out-of-vocab tokens.
+        # For some tokenizers, tokenizer.decode will happily return empty text
+        # for token ids that are out of vocab, and we don't detect token ids
+        # that are greater than the max token id before running the model.
+        # However, these token ids will later crash a cuda kernel at runtime
+        # with an index out of bounds error. This will crash the entire engine.
+        # This needs to happen before multimodal input pre-processing, which
+        # may add dummy <image> tokens that aren't part of the tokenizer's
+        # vocabulary.
+        if is_token_prompt(prompt):
+            prompt_ids = prompt["prompt_token_ids"]
+            if len(prompt_ids) == 0:
+                # Empty prompt check is handled later
+                return
+            max_input_id = max(prompt_ids)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    "Token id {} is out of vocabulary".format(max_input_id))
 
     @deprecate_kwargs(
         "inputs",
@@ -794,103 +993,10 @@ class LLMEngine:
             trace_headers=trace_headers,
             priority=priority,
         )
+    ################################################from tokens to seqGroup#############################################
 
-    def _validate_token_prompt(self, prompt: PromptType,
-                               tokenizer: AnyTokenizer):
-        # Guard against out-of-vocab tokens.
-        # For some tokenizers, tokenizer.decode will happily return empty text
-        # for token ids that are out of vocab, and we don't detect token ids
-        # that are greater than the max token id before running the model.
-        # However, these token ids will later crash a cuda kernel at runtime
-        # with an index out of bounds error. This will crash the entire engine.
-        # This needs to happen before multimodal input pre-processing, which
-        # may add dummy <image> tokens that aren't part of the tokenizer's
-        # vocabulary.
-        if is_token_prompt(prompt):
-            prompt_ids = prompt["prompt_token_ids"]
-            if len(prompt_ids) == 0:
-                # Empty prompt check is handled later
-                return
-            max_input_id = max(prompt_ids)
-            if max_input_id > tokenizer.max_token_id:
-                raise ValueError(
-                    "Token id {} is out of vocabulary".format(max_input_id))
-
-    def _create_sequence_group_with_sampling(
-        self,
-        request_id: str,
-        seq: Sequence,
-        sampling_params: SamplingParams,
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        encoder_seq: Optional[Sequence] = None,
-        priority: int = 0,
-    ) -> SequenceGroup:
-        """Creates a SequenceGroup with SamplingParams."""
-        max_logprobs = self.get_model_config().max_logprobs
-        if (sampling_params.logprobs
-                and sampling_params.logprobs > max_logprobs) or (
-                    sampling_params.prompt_logprobs
-                    and sampling_params.prompt_logprobs > max_logprobs):
-            raise ValueError(f"Cannot request more than "
-                             f"{max_logprobs} logprobs.")
-
-        sampling_params = self._build_logits_processors(
-            sampling_params, lora_request)
-
-        # Defensive copy of SamplingParams, which are used by the sampler,
-        # this doesn't deep-copy LogitsProcessor objects
-        sampling_params = sampling_params.clone()
-
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields, seq.eos_token_id)
-
-        # Create the sequence group.
-        draft_size = 1
-        if self.vllm_config.speculative_config is not None:
-            draft_size = \
-                self.vllm_config.speculative_config.num_speculative_tokens + 1
-        seq_group = SequenceGroup(
-            request_id=request_id,
-            seqs=[seq],
-            arrival_time=arrival_time,
-            sampling_params=sampling_params,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
-            encoder_seq=encoder_seq,
-            priority=priority,
-            draft_size=draft_size)
-
-        return seq_group
-
-    def _create_sequence_group_with_pooling(
-        self,
-        request_id: str,
-        seq: Sequence,
-        pooling_params: PoolingParams,
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
-        encoder_seq: Optional[Sequence] = None,
-        priority: int = 0,
-    ) -> SequenceGroup:
-        """Creates a SequenceGroup with PoolingParams."""
-        # Defensive copy of PoolingParams, which are used by the pooler
-        pooling_params = pooling_params.clone()
-        # Create the sequence group.
-        seq_group = SequenceGroup(
-            request_id=request_id,
-            seqs=[seq],
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            pooling_params=pooling_params,
-            prompt_adapter_request=prompt_adapter_request,
-            encoder_seq=encoder_seq,
-            priority=priority)
-        return seq_group
+    def stop_remote_worker_execution_loop(self) -> None:
+        self.model_executor.stop_remote_worker_execution_loop()
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -1344,6 +1450,7 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
+        # todo: 后续step推理基于当前virtual_engine对应的schedule, 虽然llm_engine不支持pp.
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
         virtual_engine = 0
@@ -2024,105 +2131,6 @@ class LLMEngine:
                 seq_span.set_attribute(
                     SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
-
-    def _validate_model_inputs(self, inputs: ProcessorInputs,
-                               lora_request: Optional[LoRARequest]):
-        encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
-
-        # For encoder-decoder multimodal models, the max_prompt_len
-        # restricts the decoder prompt length
-        if self.model_config.is_multimodal_model:
-            prompt_inputs = decoder_inputs
-        else:
-            prompt_inputs = encoder_inputs or decoder_inputs
-
-        prompt_ids = prompt_inputs["prompt_token_ids"]
-
-        if prompt_ids is None or len(prompt_ids) == 0:
-            raise ValueError("Prompt cannot be empty")
-
-        if self.model_config.is_multimodal_model:
-            max_prompt_len = self.model_config.max_model_len
-
-            if len(prompt_ids) > max_prompt_len:
-                raise ValueError(
-                    f"The prompt (total length {len(prompt_ids)}) is too long "
-                    f"to fit into the model (context length {max_prompt_len}). "
-                    "Make sure that `max_model_len` is no smaller than the "
-                    "number of text tokens plus multimodal tokens. For image "
-                    "inputs, the number of image tokens depends on the number "
-                    "of images, and possibly their aspect ratios as well.")
-
-            # TODO: Find out how many placeholder tokens are there so we can
-            # check that chunked prefill does not truncate them
-            # max_batch_len = self.scheduler_config.max_num_batched_tokens
-
-    def _build_logits_processors(
-            self, sampling_params: SamplingParams,
-            lora_request: Optional[LoRARequest]) -> SamplingParams:
-        """Constructs logits processors based on the guided_decoding,
-        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
-        those fields and adds the constructed logits processors to the
-        logits_processors field. Returns the modified sampling params."""
-
-        logits_processors = []
-
-        if sampling_params.guided_decoding is not None:
-            # Defensively copy sampling params since guided decoding logits
-            # processors can have different state for each request
-            sampling_params = copy.copy(sampling_params)
-            guided_decoding = sampling_params.guided_decoding
-
-            logger.debug(
-                "Building guided decoding logits processor in "
-                "LLMEngine. Params: %s", guided_decoding)
-
-            tokenizer = self.get_tokenizer(lora_request=lora_request)
-            guided_decoding.backend = guided_decoding.backend or \
-                self.decoding_config.guided_decoding_backend
-
-            if self.decoding_config.reasoning_backend is not None:
-                logger.debug("Building with reasoning backend %s",
-                             self.decoding_config.reasoning_backend)
-
-            processor = get_local_guided_decoding_logits_processor(
-                guided_params=guided_decoding,
-                tokenizer=tokenizer,
-                model_config=self.model_config,
-                reasoning_backend=self.decoding_config.reasoning_backend,
-            )
-            if processor:
-                logits_processors.append(processor)
-
-            # Unset so this doesn't get passed down to the model
-            sampling_params.guided_decoding = None
-
-        if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
-            tokenizer = self.get_tokenizer(lora_request=lora_request)
-
-            processors = get_openai_logits_processors(
-                logit_bias=sampling_params.logit_bias,
-                allowed_token_ids=sampling_params.allowed_token_ids,
-                tokenizer=tokenizer)
-            logits_processors.extend(processors)
-
-            # Unset so these don't get passed down to the model
-            sampling_params.logit_bias = None
-            sampling_params.allowed_token_ids = None
-
-        if len(sampling_params.bad_words) > 0:
-            tokenizer = self.get_tokenizer(lora_request)
-            processors = get_bad_words_logits_processors(
-                bad_words=sampling_params.bad_words, tokenizer=tokenizer)
-            logits_processors.extend(processors)
-
-        if logits_processors:
-            if sampling_params.logits_processors is None:
-                sampling_params.logits_processors = logits_processors
-            else:
-                sampling_params.logits_processors.extend(logits_processors)
-
-        return sampling_params
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
