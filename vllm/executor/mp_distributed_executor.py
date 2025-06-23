@@ -196,7 +196,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         for result in parallel_worker_tasks:
             result.get()
 
-    # todo: infer async.
+    ##################################infer async###############################
     async def _start_worker_execution_loop(self):
         # todo: 让non driver worker先进入执行状态, 会卡在broadcast.
         coros = [

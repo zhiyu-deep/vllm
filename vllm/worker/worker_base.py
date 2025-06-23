@@ -493,7 +493,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         )
 
 
-# todo: 代表进程级别的worker, 1. 对worker运行环境进行管理, 2. 对worker初始化进行管理, 3. 功能代理.
+# todo: 对worker进行封装, 1. 对worker运行环境进行管理, 2. 对worker初始化进行管理, 3. 功能代理.
 class WorkerWrapperBase:
     """
     This class represents one process in an executor/engine. It is responsible
@@ -631,6 +631,7 @@ class WorkerWrapperBase:
             logger.exception(msg)
             raise e
 
+    # todo: 对worker中function进行映射.
     def __getattr__(self, attr):
         return getattr(self.worker, attr)
 

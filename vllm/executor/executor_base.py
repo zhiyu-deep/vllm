@@ -34,7 +34,7 @@ class ExecutorBase(ABC):
 
     uses_ray: bool  # whether the executor uses Ray for orchestration.
 
-    # todo: init.
+    ##################################init###############################
     @abstractmethod
     def _init_executor(self) -> None:
         raise NotImplementedError
@@ -94,7 +94,7 @@ class ExecutorBase(ABC):
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
-    # todo: 任务派发.
+    ##################################dispatch###############################
     @abstractmethod
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
@@ -125,7 +125,7 @@ class ExecutorBase(ABC):
         """
         raise NotImplementedError
 
-    # todo: functional.
+    ##################################functional###############################
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
         return all(self.collective_rpc("add_lora", args=(lora_request, )))
@@ -233,7 +233,7 @@ class ExecutorBase(ABC):
     def __del__(self):
         self.shutdown()
 
-    # todo: infer.
+    ##################################infer###############################
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
         Run a function directly on the model inside each worker,
@@ -282,14 +282,16 @@ class ExecutorBase(ABC):
 class DistributedExecutorBase(ExecutorBase):
     """Abstract superclass of distributed executor implementations."""
 
+    ##################################init###############################
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
-        # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
+        # in the parallel workers.
+        # todo: It's a coroutine in the AsyncLLMEngine case.
         self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
 
         super().__init__(*args, **kwargs)
 
-    # todo: 任务派发.
+    ##################################dispatch###############################
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
@@ -318,7 +320,7 @@ class DistributedExecutorBase(ExecutorBase):
         """
         raise NotImplementedError
 
-    # todo: infer sync.
+    ##################################infer sync###############################
     @abstractmethod
     def _driver_execute_model(
             self, execute_model_req: Optional[ExecuteModelRequest]
@@ -371,7 +373,7 @@ class DistributedExecutorBase(ExecutorBase):
         assert driver_outputs is not None
         return driver_outputs
 
-    # todo: infer async.
+    ##################################infer async###############################
     @abstractmethod
     async def _start_worker_execution_loop(self):
         """Run execution loop on all workers. It guarantees all workers run

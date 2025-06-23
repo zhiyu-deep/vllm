@@ -149,6 +149,7 @@ class WorkerMonitor(threading.Thread):
         self.result_handler.close()
 
 
+# todo: 在子进程空间内, 对worker进行管理.
 class ProcessWorkerWrapper:
     """Local process wrapper for vllm.worker.Worker,
     for handling single-node multi-GPU tensor parallel."""
