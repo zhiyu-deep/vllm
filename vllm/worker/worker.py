@@ -43,6 +43,7 @@ class Worker(LocalOrDistributedWorkerBase):
     distributed inference, each worker is assigned a partition of the model.
     """
 
+    ######################################################init inf#####################################################
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -112,7 +113,7 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
-    #######################################################meta info####################################################
+    ######################################################meta inf######################################################
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until

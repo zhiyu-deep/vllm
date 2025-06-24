@@ -98,7 +98,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
-    async_callback: Optional[Callable] = None
+    async_callback: Optional[Callable] = None  # todo: 用来控制output的async处理.
     scheduler_outputs: Optional[SchedulerOutputs] = None
     previous_hidden_states: Optional[torch.Tensor] = None
 

@@ -315,27 +315,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         else:
             return self._get_worker_input_from_broadcast()
 
-    @property
-    @abstractmethod
-    def do_metadata_broadcast(self) -> bool:
-        """
-        Used by the default `execute_model` to check whether broadcast is
-        needed to transfer request inputs from the driver worker to other
-        workers in the TP group. If WorkerBase subclass only supports
-        single-worker execution, then this method should return False.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
-        """
-        Prepare the inputs to WorkerBase.execute_worker from an execution
-        request. This method may move data to the worker's local device. It is
-        not allowed to communicate with other workers or devices.
-        """
-        raise NotImplementedError
-
     def _get_worker_input_from_broadcast(
             self
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
@@ -355,6 +334,16 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         kwargs = extract_previous_hidden_states(broadcast_data)
 
         return model_input, worker_input, kwargs
+
+    @abstractmethod
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        """
+        Prepare the inputs to WorkerBase.execute_worker from an execution
+        request. This method may move data to the worker's local device. It is
+        not allowed to communicate with other workers or devices.
+        """
+        raise NotImplementedError
 
     def _get_driver_input_and_broadcast(
             self, execute_model_req: ExecuteModelRequest
@@ -384,6 +373,17 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 async_callback=execute_model_req.async_callback)
 
         return model_input, worker_input, kwargs
+
+    @property
+    @abstractmethod
+    def do_metadata_broadcast(self) -> bool:
+        """
+        Used by the default `execute_model` to check whether broadcast is
+        needed to transfer request inputs from the driver worker to other
+        workers in the TP group. If WorkerBase subclass only supports
+        single-worker execution, then this method should return False.
+        """
+        raise NotImplementedError
 
     ######################################################executing#####################################################
     @abstractmethod
@@ -493,7 +493,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         )
 
 
-# todo: 对worker进行封装, 1. 对worker运行环境进行管理, 2. 对worker初始化进行管理, 3. 功能代理.
+# todo: worker工厂类:
+#   1. 对worker类型感知, 创建具体类型的worker对象.
+#   2. 对worker运行环境进行管理.
+#   3. 功能代理.
 class WorkerWrapperBase:
     """
     This class represents one process in an executor/engine. It is responsible
