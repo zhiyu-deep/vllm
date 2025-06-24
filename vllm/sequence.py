@@ -768,7 +768,11 @@ class SequenceGroup:
                                              num_scheduler_steps: int,
                                              is_multi_step: bool,
                                              enable_chunking: bool) -> None:
-
+        # todo:
+        #   1. not is_multi_step: num_scheduler_steps = 1.
+        #   2. is_multi_step: 使用num_lookahead_slots
+        #      2.1: prefill: num_lookahead_slots == 0
+        #      2.2: decode: num_lookahead_slots + 1 == num_scheduler_steps
         if not is_multi_step:
             self.init_multi_step(num_steps=num_scheduler_steps)
             return

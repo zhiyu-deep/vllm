@@ -66,8 +66,19 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
     draft_worker_kwargs = kwargs.copy()
 
+    # todo: score worker构建(其实就是worker.py::Worker).
+    #   __init__(
+    #       self,
+    #       vllm_config: VllmConfig,
+    #       local_rank: int,
+    #       rank: int,
+    #       distributed_init_method: str,
+    #       is_driver_worker: bool = False,
+    #       model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None)
+    # todo: 1. model_runner_cls选用TargetModelRunner.
     kwargs["model_runner_cls"] = TargetModelRunner
     target_worker_config = copy.deepcopy(vllm_config)
+    # todo: 2. worker_cls使用sd_worker_cls.
     target_worker_config.parallel_config.worker_cls =\
         target_worker_config.parallel_config.sd_worker_cls
     cls = resolve_obj_by_qualname(
@@ -78,6 +89,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     target_worker.model_runner.disable_logprobs =\
          speculative_config.disable_logprobs
 
+    # todo: draft model params.
     draft_worker_config = copy.deepcopy(vllm_config)
     draft_worker_config.model_config = speculative_config.draft_model_config
     draft_worker_config.quant_config = VllmConfig._get_quantization_config(
@@ -88,7 +100,6 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         draft_worker_config.parallel_config.sd_worker_cls
     draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
     # TODO allow draft-model specific load config.
-
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
         vllm_config=draft_worker_config,
@@ -159,6 +170,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         allow_zero_draft_token_step = True
         enable_lm_head_weight_load = False
+
+        # todo: draft worker.
         num_spec_prefill_steps = 1
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
@@ -209,6 +222,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
 
+        # todo: spec decode sampler.
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
             spec_decode_sampler = RejectionSampler()
@@ -323,6 +337,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # their last forward pass. Needed only if KV cache is being
         # used for token generation such as in the case of MultiStepWorker.
         self._seq_with_bonus_token_in_last_step: Set[int] = set()
+
+        # todo: {active request id: set(sequence id)}.
         # Tracks the currently active request ids and the sequence IDs
         # corresponding to them
         self._request_id_seq_id_mapping: Dict[str, Set[int]] = defaultdict(set)
@@ -471,8 +487,11 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             return []
 
         self._track_finished_requests(execute_model_req)
+
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
+
+        # todo: 状态信息, 目前可以当作判断是否prefill, prefill: 不进行spec计算(score->proposal), not prefill: 先进行spec计算(proposal->score)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
         all_prompt = True
         atleast_one_prompt = False
@@ -482,7 +501,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             atleast_one_prompt = atleast_one_prompt or sgm.is_prompt
             all_zero_spec_tokens = all_zero_spec_tokens and (
                 sgm.num_speculative_tokens == 0)
-
         if all_prompt and execute_model_req.seq_group_metadata_list:
             assert num_lookahead_slots == 0, (
                 "Prompt only runs should have num_lookahead_slots equal to 0. "
@@ -541,13 +559,455 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                                      skip_proposer=disable_all_speculation)
         return self._run_speculative_decoding_step(execute_model_req,
                                                    num_lookahead_slots)
+    ###################################################driver execute###################################################
+    @nvtx_range("spec_decode_worker._run_no_spec")
+    def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
+                     skip_proposer: bool) -> List[SamplerOutput]:
+        """Run a single generation step without any speculation. The input is
+        sent to the proposer and scorer model so that the KV cache is consistent
+        between the two. When skip_proposer is True, the proposer model is
+        not called, meaning that the kv-cache in proposer for requests is not
+        updated, so they cannot enable spec decode in the rest decoding.
+        """
 
+        sampler_output = self.scorer_worker.execute_model(execute_model_req)
+        assert len(sampler_output) == 1
+        sampler_output = sampler_output[0]
+
+        # todo: Store hidden states from target model execution, BxD.
+        hidden_states = sampler_output.hidden_states
+        if hidden_states is not None:
+            # Only decodes and prefill terminal chunks need a hidden state.
+            seq_group_meta_with_hidden = [
+                sg for sg in execute_model_req.seq_group_metadata_list
+                if sg.do_sample
+            ]
+            if any(seq.is_prompt for seq in seq_group_meta_with_hidden):
+                # Drop hidden_states with no prediction (eg non-terminal chunks)
+                hidden_states = hidden_states[
+                    torch.where(sampler_output.sampled_token_ids -
+                                VLLM_INVALID_TOKEN_ID)[0]]
+            if self.previous_hidden_states is None and len(
+                    seq_group_meta_with_hidden):
+                self.previous_hidden_states = HiddenStates(
+                    hidden_states, seq_group_meta_with_hidden)
+            elif self.previous_hidden_states and len(
+                    seq_group_meta_with_hidden):
+                self.previous_hidden_states.update(hidden_states,
+                                                   seq_group_meta_with_hidden)
+
+        if not skip_proposer:
+            # We prepare the prefill hidden states here so that there no
+            # additional complexity in worker for spec_decode vs non_spec_decode
+            # flow and execute_model doesn't need additional modifications.
+            execute_model_req.previous_hidden_states = \
+                prepare_prefill_hidden_states(
+                    sampler_output.prefill_hidden_states)
+            for i in range(self._num_spec_prefill_steps):
+                execute_model_req.spec_step_idx = i
+                self.proposer_worker.execute_model(execute_model_req)
+
+        sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
+            execute_model_req=execute_model_req, sampler_output=sampler_output)
+                                    if self._disable_logprobs else
+                                    [sampler_output])
+
+        # Clear device tensors from sampler output. This reduces communication
+        # overhead when the engine runs in a different process than the workers.
+        sampler_output.sampled_token_probs = None
+        sampler_output.sampled_token_ids = None
+        sampler_output.logprobs = None
+        return sampler_output_to_return
+
+    @nvtx_range("spec_decode_worker._verify_tokens")
+    def _verify_tokens(
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            proposal_scores: SpeculativeScores,
+            proposals: SpeculativeProposals,
+            max_proposal_len: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Determine which speculative tokens are accepted using the
+        probabilities of each token according to the proposer and scorer models.
+
+        Returns a tuple of Tensors, one for the accepted token ids and one for
+        the logprobs according to the scoring model.
+        """
+        proposal_lens_list = proposals.proposal_lens.tolist()
+
+        # vLLM currently only supports proposal lens equal to zero or the batch
+        # proposal len. This adds some complexity (splitting the batch into spec
+        # and non spec sequences) and should be removed in the future. It can be
+        # done by supporting per-sequence proposal lens.
+        (_, spec_indices), (_, non_spec_indices) = split_batch_by_proposal_len(
+            seq_group_metadata_list, proposal_lens_list)
+        original_indices = spec_indices + non_spec_indices
+
+        # Get probabilities of target model, including bonus tokens.
+        proposal_verifier_probs = proposal_scores.probs[spec_indices]
+
+        # Get non-speculative sampled tokens from target model.
+        non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
+
+        # Get bonus tokens from target model.
+        bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
+
+        # Get probabilities according to proposal method.
+        proposal_probs = proposals.proposal_probs[spec_indices]
+
+        # Get proposed tokens.
+        proposal_token_ids = proposals.proposal_token_ids[spec_indices]
+
+        # Sampler arguments
+        sampler_extra_kwargs: Dict[str, Any] = {}
+        if self.generators and isinstance(self.spec_decode_sampler,
+                                          SpecDecodeStochasticBaseSampler):
+            sampler_extra_kwargs["seeded_seqs"] = {
+                idx: self.generators[sgm.request_id]
+                for idx, sgm in enumerate(seq_group_metadata_list)
+                if sgm.sampling_params.seed is not None
+            }
+
+        accepted_token_ids = self.spec_decode_sampler(
+            target_with_bonus_probs=proposal_verifier_probs,
+            bonus_token_ids=bonus_token_ids,
+            draft_probs=proposal_probs,
+            draft_token_ids=proposal_token_ids,
+            **sampler_extra_kwargs,
+        )
+        # Append output tokens from non-speculative sequences to
+        # the accepted token ids tensor.
+        non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
+                                                       1).clone()
+        non_spec_token_ids[:, 1:] = -1
+        accepted_token_ids = torch.cat(
+            [accepted_token_ids, non_spec_token_ids])
+        logprobs = proposal_scores.logprobs
+        # Rearrange so that results are in the order of the original seq group
+        # metadata.
+        accepted_token_ids[original_indices] = accepted_token_ids.clone()
+
+        # B x K+1 x D
+        hidden_states = proposal_scores.hidden_states
+        if hidden_states is not None:
+            # Only get terminal hidden states for next step
+            terminal_metadata = [
+                sg for sg in seq_group_metadata_list if sg.do_sample
+            ]
+
+            # Contract hidden states based on accepted tokens
+            hs_size = hidden_states.shape[-1]
+            accepted_index = accepted_token_ids + 1  # Convert -1 to 0
+            accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)  # b
+            # Drop non-terminal prefill chunks hidden states.
+            hidden_states = hidden_states[accepted_index !=
+                                          VLLM_INVALID_TOKEN_ID]
+            accepted_index = accepted_index[accepted_index !=
+                                            VLLM_INVALID_TOKEN_ID]
+            assert len(accepted_index) == hidden_states.shape[0] == len(
+                terminal_metadata)
+            index = accepted_index[:, None, None].expand(-1, 1,
+                                                         hs_size)  # b x 1 x d
+            second_last_token_hidden_states = hidden_states[:, -2]  # b x d
+            hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
+            # Store hidden states from target model for subsequent decode step
+            self.previous_hidden_states = HiddenStates(
+                hidden_states, terminal_metadata,
+                second_last_token_hidden_states)
+        return accepted_token_ids, logprobs
+
+    def _create_output_sampler_list(
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
+            target_logprobs: torch.Tensor,  # shape: [batch_size, k+1, vocab_size]
+            prompt_logprobs: Optional[
+                torch.Tensor],  # shape: [nprompt_tokens, vocab_size]
+            k: int,
+            stage_times: Tuple[float, float, float],
+    ) -> List[SamplerOutput]:
+        """Given the accepted token ids, create a list of SamplerOutput.
+
+        The output is padded with -1 tokens such that each sequence has
+        the same number of outputs.
+        """
+        batch_size, num_steps = accepted_token_ids.shape
+        accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
+        if self._disable_logprobs:
+            # We are skipping the logprobs. Hence don't serialize the
+            # logprobs related tensors from the GPU. Instead create
+            # empty/dummy lists.
+            (accepted_token_id_ranks_by_step,
+             accepted_token_id_logprobs_by_step,
+             topk_logprobs_by_step, topk_indices_by_step) = \
+                self._create_dummy_logprob_lists(
+                    batch_size, num_steps,
+                    self.scorer_worker.model_config.max_logprobs)
+        else:
+            # Organize input tensors by step instead of by sequence.
+            target_logprobs_by_step = target_logprobs.transpose(0, 1)
+            # Serialize all tensors into Python lists.
+            (accepted_token_id_ranks_by_step,
+             accepted_token_id_logprobs_by_step,
+             topk_logprobs_by_step, topk_indices_by_step) = \
+                self._create_logprob_lists_from_tensors(
+                    target_logprobs_by_step, accepted_token_ids_by_step,
+                    self.scorer_worker.model_config.max_logprobs)
+
+        # Get the sequence ids and num_logprobs (sampling parameter) in the
+        # batch.
+        seq_ids, request_ids_seq_ids_mapping = get_all_seq_ids_and_request_ids(
+            seq_group_metadata_list)
+
+        num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
+
+        # Serialize tensor to CPU Python list.
+        accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
+
+        # Construct the output on a per-step, per-sequence basis.
+        # Non-terminal prefill chunks will end up here as rows with just -1s
+        # i.e mixed-batch [[-1, 1576], [-1, 29884], [-1, -1], [-1, -1]] while
+        # terminal chunks will only have one generated token at time 0.
+        sampler_output_list: List[SamplerOutput] = []
+
+        # Prefills are not multi-step (return at most 1 token), in order to
+        # avoid padding or repetition to fit decodes, we separate them.
+        for i, sg in enumerate(seq_group_metadata_list):
+            if not sg.is_prompt:
+                # Requests are ordered as prefills|decodes=>no more prefills.
+                break
+            num_logprobs = num_logprobs_per_seq[i]
+            seq_kwargs = dict(token_id=-1,
+                              token_id_logprob_rank=0,
+                              token_id_logprob=-float('inf'),
+                              topk_token_ids=[-1] * num_logprobs,
+                              topk_logprobs=[-float('inf')] * num_logprobs,
+                              seq_id=seq_ids[i])
+            # Terminal chunk, has token.
+            if sg.do_sample:
+                seq_kwargs.update(
+                    dict(
+                        token_id=accepted_token_ids[i][0].item(),
+                        token_id_logprob_rank=accepted_token_id_ranks_by_step[
+                            0][i],
+                        token_id_logprob=accepted_token_id_logprobs_by_step[0]
+                        [i],
+                        topk_token_ids=topk_indices_by_step[0][i]
+                        [:num_logprobs],
+                        # output only so step is 0
+                        topk_logprobs=topk_logprobs_by_step[0][i]
+                        [:num_logprobs],
+                    ))
+            needs_plogs = (sg.sampling_params.prompt_logprobs
+                           and sg.sampling_params.prompt_logprobs > 0)
+            plogs = None
+            if prompt_logprobs is not None:
+                # Even non-terminal prompt chunks can have logprobs here.
+                plogs = prompt_logprobs[i]
+            elif needs_plogs:
+                # Prompt logprobs are requested but `_disable_logprobs` is set.
+                seq_data = next(iter(sg.seq_data.values()))
+                # Get only the tokens in this chunk!
+                prompt_token_ids = seq_data.get_prompt_token_ids()
+                prompt_token_ids = prompt_token_ids[
+                                   seq_data.
+                                   _num_computed_tokens:seq_data._num_computed_tokens +
+                                                        sg.token_chunk_size]
+
+                is_first_chunk = seq_data._num_computed_tokens == 0
+                # There's no prob generated for the first token in a sequence.
+                if is_first_chunk:
+                    prompt_token_ids = prompt_token_ids[1:]
+                plogs = [
+                    create_logprobs_output(
+                        token_id=p_token_id,
+                        token_id_logprob_rank=-1,
+                        token_id_logprob=0.0,
+                        topk_token_ids=[],
+                        topk_logprobs=[],
+                    ) for p_token_id in prompt_token_ids
+                ]
+            seq_kwargs.update(dict(prompt_logprobs=plogs))
+
+            sampler_output_list.append(
+                SamplerOutput(
+                    outputs=[create_sequence_group_output(
+                        **seq_kwargs)]))  # type: ignore
+
+        # Decodes, create one SamplerOutput per-step (at most K+1).
+        for step_index in range(num_steps):
+            if all(token_id == -1 for sg, token_id in zip(
+                    seq_group_metadata_list,
+                    accepted_token_ids_by_step[step_index])
+                   if not sg.is_prompt):
+                break
+
+            step_output_token_ids: List[CompletionSequenceGroupOutput] = []
+            for sequence_index in range(batch_size):
+                seq_meta = seq_group_metadata_list[sequence_index]
+                # Prompts already processed above.
+                if seq_meta.is_prompt:
+                    continue
+
+                # Each sequence may have a different num_logprobs; retrieve it.
+                num_logprobs = num_logprobs_per_seq[sequence_index]
+                step_output_token_ids.append(
+                    create_sequence_group_output(
+                        token_id=accepted_token_ids_by_step[step_index]
+                        [sequence_index],
+                        token_id_logprob_rank=accepted_token_id_ranks_by_step[
+                            step_index][sequence_index],
+                        token_id_logprob=accepted_token_id_logprobs_by_step[
+                            step_index][sequence_index],
+                        seq_id=seq_ids[sequence_index],
+                        topk_token_ids=topk_indices_by_step[step_index]
+                                       [sequence_index][:num_logprobs],
+                        topk_logprobs=topk_logprobs_by_step[step_index]
+                                      [sequence_index][:num_logprobs],
+                        step_index=step_index))
+            sampler_output_list.append(
+                SamplerOutput(outputs=step_output_token_ids))
+
+        # Populate the data structures needed to keep track of sequences with
+        # bonus tokens.
+        self._track_sequences_with_bonus_tokens(seq_ids,
+                                                request_ids_seq_ids_mapping,
+                                                accepted_token_ids_by_step)
+        maybe_rejsample_metrics = (
+            self._metrics.maybe_collect_rejsample_metrics(k))
+        if maybe_rejsample_metrics is not None:
+            sampler_output_list[
+                0].spec_decode_worker_metrics = maybe_rejsample_metrics
+
+            # Log time spent in each stage periodically.
+            # This is periodic because the rejection sampler emits metrics
+            # periodically.
+            self._maybe_log_stage_times(*stage_times)
+        # First `n_prefills` entries will contain prefills SamplerOutput when
+        # chunked prefill is enabled, the rest is decodes in multi-step format.
+        return sampler_output_list
+
+    @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
+    def _run_speculative_decoding_step(
+            self, execute_model_req: ExecuteModelRequest,
+            num_lookahead_slots: int) -> List[SamplerOutput]:
+        """Execute a single step of speculative decoding.
+
+        This invokes the proposer worker to get k speculative tokens for each
+        sequence, then scores each speculative token using the scoring worker.
+
+        When `enable_chunked_prefill` is set, scorer will batch decodes and
+        prefills, while proposer will sync its KV-cache by running an extra
+        forward on prefills.
+
+        Returns a list of SamplerOutput, each containing a single token per
+        sequence.
+        """
+        # With prefill chunking, expect requests to have prompts first
+        # so that backend gets prefill|decode.
+        assert num_lookahead_slots == execute_model_req.num_lookahead_slots
+
+        # Pass last hidden states from target model to proposer
+        execute_model_req.previous_hidden_states = self.previous_hidden_states
+        self.previous_hidden_states = None
+
+        with Timer() as proposal_timer:
+            # Generate proposals using draft worker.
+            proposals = self.proposer_worker.get_spec_proposals(
+                execute_model_req, self._seq_with_bonus_token_in_last_step)
+
+        if not self._allow_zero_draft_token_step and proposals.no_proposals:
+            #TODO: Fix it #5814
+            raise RuntimeError("Cannot handle cases where distributed draft "
+                               "workers generate no tokens")
+
+        execute_model_req.previous_hidden_states = None
+
+        with Timer() as scoring_timer:
+            proposal_scores = self.scorer.score_proposals(
+                execute_model_req,
+                proposals,
+            )
+
+        _, (non_spec_seqs, non_spec_indices) = split_batch_by_proposal_len(
+            execute_model_req.seq_group_metadata_list, proposals.proposal_lens)
+        # With prefill chunking enabled, `non_spec_seqs` contains prefills too:
+        # discard decodes that have already been processed by proposer.
+        non_spec_indices = [
+            idx for idx in non_spec_indices
+            if execute_model_req.seq_group_metadata_list[idx].is_prompt
+        ]
+        if len(non_spec_indices):
+            all_hidden_states = proposal_scores.hidden_states
+            if all_hidden_states is not None:
+                prefill_hidden_states = all_hidden_states[non_spec_indices]
+                execute_model_req.previous_hidden_states = \
+                    prepare_prefill_hidden_states(prefill_hidden_states)
+            # Sync proposer KV cache for prefills.
+            prefill_req = execute_model_req.clone(non_spec_seqs)
+            # TODO avoid sampling here?
+            self.proposer_worker.execute_model(prefill_req)
+
+        with Timer() as verification_timer:
+            accepted_token_ids, target_logprobs = self._verify_tokens(
+                execute_model_req.seq_group_metadata_list, proposal_scores,
+                proposals, execute_model_req.num_lookahead_slots)
+
+        stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
+                       scoring_timer.elapsed_time_ms,
+                       verification_timer.elapsed_time_ms)
+
+        return self._create_output_sampler_list(
+            execute_model_req.seq_group_metadata_list,
+            accepted_token_ids,
+            target_logprobs=target_logprobs,
+            prompt_logprobs=proposal_scores.prompt_logprobs
+            if not self._disable_logprobs else None,
+            k=execute_model_req.num_lookahead_slots,
+            stage_times=stage_times)
+
+    ###################################################non-driver execute###############################################
     @torch.inference_mode()
     def start_worker_execution_loop(self) -> None:
         """Execute model loop to perform speculative decoding
         in parallel worker."""
         while self._run_non_driver_rank():
             pass
+
+    def _run_non_driver_rank(self) -> bool:
+        """Run proposer and verifier model in non-driver workers. This is used
+        for both speculation cases (num_lookahead_slots>0) and non-speculation
+        cases (e.g. prefill).
+
+        Returns True if there are remaining sequences to process.
+        """
+        assert self.rank != self._driver_rank
+
+        data = broadcast_tensor_dict(src=self._driver_rank)
+        if not data:
+            return False
+        num_lookahead_slots = data["num_lookahead_slots"]
+
+        # In case of prefill, scorer_worker has to be run before proposer so
+        # that the hidden states can be propagated to proposer when needed.
+        if data["no_spec"]:
+            self.scorer_worker.execute_model()
+
+        if not data["disable_all_speculation"]:
+            # Even if num_lookahead_slots is zero, we want to run the
+            # proposer model as it may have KV.
+            #
+            # We run the proposer once per lookahead slot. In the future we
+            # should delegate how many times it runs to the proposer.
+            for _ in range(max(num_lookahead_slots, 1)):
+                self.proposer_worker.execute_model()
+
+        if not data["no_spec"]:
+            self.scorer_worker.execute_model()
+            if data["run_spec_proposer_for_prefill"]:
+                self.proposer_worker.execute_model()
+
+        return True
 
     def _should_disable_all_speculation(
             self, execute_model_req: ExecuteModelRequest) -> bool:
@@ -659,447 +1119,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             output_index += 1
 
         return [SamplerOutput(outputs=completion_seq_group_output_list)]
-
-    @nvtx_range("spec_decode_worker._run_no_spec")
-    def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
-                     skip_proposer: bool) -> List[SamplerOutput]:
-        """Run a single generation step without any speculation. The input is
-        sent to the proposer and scorer model so that the KV cache is consistent
-        between the two. When skip_proposer is True, the proposer model is
-        not called, meaning that the kv-cache in proposer for requests is not
-        updated, so they cannot enable spec decode in the rest decoding.
-        """
-
-        sampler_output = self.scorer_worker.execute_model(execute_model_req)
-        assert len(sampler_output) == 1
-        sampler_output = sampler_output[0]
-
-        # Store hidden states from target model execution, BxD.
-        hidden_states = sampler_output.hidden_states
-        if hidden_states is not None:
-            # Only decodes and prefill terminal chunks need a hidden state.
-            seq_group_meta_with_hidden = [
-                sg for sg in execute_model_req.seq_group_metadata_list
-                if sg.do_sample
-            ]
-            if any(seq.is_prompt for seq in seq_group_meta_with_hidden):
-                # Drop hidden_states with no prediction (eg non-terminal chunks)
-                hidden_states = hidden_states[
-                    torch.where(sampler_output.sampled_token_ids -
-                                VLLM_INVALID_TOKEN_ID)[0]]
-            if self.previous_hidden_states is None and len(
-                    seq_group_meta_with_hidden):
-                self.previous_hidden_states = HiddenStates(
-                    hidden_states, seq_group_meta_with_hidden)
-            elif self.previous_hidden_states and len(
-                    seq_group_meta_with_hidden):
-                self.previous_hidden_states.update(hidden_states,
-                                                   seq_group_meta_with_hidden)
-
-        if not skip_proposer:
-            # We prepare the prefill hidden states here so that there no
-            # additional complexity in worker for spec_decode vs non_spec_decode
-            # flow and execute_model doesn't need additional modifications.
-            execute_model_req.previous_hidden_states = \
-                prepare_prefill_hidden_states(
-                    sampler_output.prefill_hidden_states)
-            for i in range(self._num_spec_prefill_steps):
-                execute_model_req.spec_step_idx = i
-                self.proposer_worker.execute_model(execute_model_req)
-
-        sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
-            execute_model_req=execute_model_req, sampler_output=sampler_output)
-                                    if self._disable_logprobs else
-                                    [sampler_output])
-
-        # Clear device tensors from sampler output. This reduces communication
-        # overhead when the engine runs in a different process than the workers.
-        sampler_output.sampled_token_probs = None
-        sampler_output.sampled_token_ids = None
-        sampler_output.logprobs = None
-        return sampler_output_to_return
-
-    def _run_non_driver_rank(self) -> bool:
-        """Run proposer and verifier model in non-driver workers. This is used
-        for both speculation cases (num_lookahead_slots>0) and non-speculation
-        cases (e.g. prefill).
-
-        Returns True if there are remaining sequences to process.
-        """
-        assert self.rank != self._driver_rank
-
-        data = broadcast_tensor_dict(src=self._driver_rank)
-        if not data:
-            return False
-        num_lookahead_slots = data["num_lookahead_slots"]
-
-        # In case of prefill, scorer_worker has to be run before proposer so
-        # that the hidden states can be propagated to proposer when needed.
-        if data["no_spec"]:
-            self.scorer_worker.execute_model()
-
-        if not data["disable_all_speculation"]:
-            # Even if num_lookahead_slots is zero, we want to run the
-            # proposer model as it may have KV.
-            #
-            # We run the proposer once per lookahead slot. In the future we
-            # should delegate how many times it runs to the proposer.
-            for _ in range(max(num_lookahead_slots, 1)):
-                self.proposer_worker.execute_model()
-
-        if not data["no_spec"]:
-            self.scorer_worker.execute_model()
-            if data["run_spec_proposer_for_prefill"]:
-                self.proposer_worker.execute_model()
-
-        return True
-
-    @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
-    def _run_speculative_decoding_step(
-            self, execute_model_req: ExecuteModelRequest,
-            num_lookahead_slots: int) -> List[SamplerOutput]:
-        """Execute a single step of speculative decoding.
-
-        This invokes the proposer worker to get k speculative tokens for each
-        sequence, then scores each speculative token using the scoring worker.
-
-        When `enable_chunked_prefill` is set, scorer will batch decodes and 
-        prefills, while proposer will sync its KV-cache by running an extra
-        forward on prefills.
-
-        Returns a list of SamplerOutput, each containing a single token per
-        sequence.
-        """
-        # With prefill chunking, expect requests to have prompts first
-        # so that backend gets prefill|decode.
-        assert num_lookahead_slots == execute_model_req.num_lookahead_slots
-
-        # Pass last hidden states from target model to proposer
-        execute_model_req.previous_hidden_states = self.previous_hidden_states
-        self.previous_hidden_states = None
-
-        with Timer() as proposal_timer:
-            # Generate proposals using draft worker.
-            proposals = self.proposer_worker.get_spec_proposals(
-                execute_model_req, self._seq_with_bonus_token_in_last_step)
-
-        if not self._allow_zero_draft_token_step and proposals.no_proposals:
-            #TODO: Fix it #5814
-            raise RuntimeError("Cannot handle cases where distributed draft "
-                               "workers generate no tokens")
-
-        execute_model_req.previous_hidden_states = None
-
-        with Timer() as scoring_timer:
-            proposal_scores = self.scorer.score_proposals(
-                execute_model_req,
-                proposals,
-            )
-
-        _, (non_spec_seqs, non_spec_indices) = split_batch_by_proposal_len(
-            execute_model_req.seq_group_metadata_list, proposals.proposal_lens)
-        # With prefill chunking enabled, `non_spec_seqs` contains prefills too:
-        # discard decodes that have already been processed by proposer.
-        non_spec_indices = [
-            idx for idx in non_spec_indices
-            if execute_model_req.seq_group_metadata_list[idx].is_prompt
-        ]
-        if len(non_spec_indices):
-            all_hidden_states = proposal_scores.hidden_states
-            if all_hidden_states is not None:
-                prefill_hidden_states = all_hidden_states[non_spec_indices]
-                execute_model_req.previous_hidden_states = \
-                    prepare_prefill_hidden_states(prefill_hidden_states)
-            # Sync proposer KV cache for prefills.
-            prefill_req = execute_model_req.clone(non_spec_seqs)
-            # TODO avoid sampling here?
-            self.proposer_worker.execute_model(prefill_req)
-
-        with Timer() as verification_timer:
-            accepted_token_ids, target_logprobs = self._verify_tokens(
-                execute_model_req.seq_group_metadata_list, proposal_scores,
-                proposals, execute_model_req.num_lookahead_slots)
-
-        stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
-                       scoring_timer.elapsed_time_ms,
-                       verification_timer.elapsed_time_ms)
-
-        return self._create_output_sampler_list(
-            execute_model_req.seq_group_metadata_list,
-            accepted_token_ids,
-            target_logprobs=target_logprobs,
-            prompt_logprobs=proposal_scores.prompt_logprobs
-            if not self._disable_logprobs else None,
-            k=execute_model_req.num_lookahead_slots,
-            stage_times=stage_times)
-
-    @nvtx_range("spec_decode_worker._verify_tokens")
-    def _verify_tokens(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        proposal_scores: SpeculativeScores,
-        proposals: SpeculativeProposals,
-        max_proposal_len: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Determine which speculative tokens are accepted using the
-        probabilities of each token according to the proposer and scorer models.
-
-        Returns a tuple of Tensors, one for the accepted token ids and one for
-        the logprobs according to the scoring model.
-        """
-        proposal_lens_list = proposals.proposal_lens.tolist()
-
-        # vLLM currently only supports proposal lens equal to zero or the batch
-        # proposal len. This adds some complexity (splitting the batch into spec
-        # and non spec sequences) and should be removed in the future. It can be
-        # done by supporting per-sequence proposal lens.
-        (_, spec_indices), (_, non_spec_indices) = split_batch_by_proposal_len(
-            seq_group_metadata_list, proposal_lens_list)
-        original_indices = spec_indices + non_spec_indices
-
-        # Get probabilities of target model, including bonus tokens.
-        proposal_verifier_probs = proposal_scores.probs[spec_indices]
-
-        # Get non-speculative sampled tokens from target model.
-        non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
-
-        # Get bonus tokens from target model.
-        bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
-
-        # Get probabilities according to proposal method.
-        proposal_probs = proposals.proposal_probs[spec_indices]
-
-        # Get proposed tokens.
-        proposal_token_ids = proposals.proposal_token_ids[spec_indices]
-
-        # Sampler arguments
-        sampler_extra_kwargs: Dict[str, Any] = {}
-        if self.generators and isinstance(self.spec_decode_sampler,
-                                          SpecDecodeStochasticBaseSampler):
-            sampler_extra_kwargs["seeded_seqs"] = {
-                idx: self.generators[sgm.request_id]
-                for idx, sgm in enumerate(seq_group_metadata_list)
-                if sgm.sampling_params.seed is not None
-            }
-
-        accepted_token_ids = self.spec_decode_sampler(
-            target_with_bonus_probs=proposal_verifier_probs,
-            bonus_token_ids=bonus_token_ids,
-            draft_probs=proposal_probs,
-            draft_token_ids=proposal_token_ids,
-            **sampler_extra_kwargs,
-        )
-        # Append output tokens from non-speculative sequences to
-        # the accepted token ids tensor.
-        non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
-                                                       1).clone()
-        non_spec_token_ids[:, 1:] = -1
-        accepted_token_ids = torch.cat(
-            [accepted_token_ids, non_spec_token_ids])
-        logprobs = proposal_scores.logprobs
-        # Rearrange so that results are in the order of the original seq group
-        # metadata.
-        accepted_token_ids[original_indices] = accepted_token_ids.clone()
-
-        # B x K+1 x D
-        hidden_states = proposal_scores.hidden_states
-        if hidden_states is not None:
-            # Only get terminal hidden states for next step
-            terminal_metadata = [
-                sg for sg in seq_group_metadata_list if sg.do_sample
-            ]
-
-            # Contract hidden states based on accepted tokens
-            hs_size = hidden_states.shape[-1]
-            accepted_index = accepted_token_ids + 1  # Convert -1 to 0
-            accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)  # b
-            # Drop non-terminal prefill chunks hidden states.
-            hidden_states = hidden_states[accepted_index !=
-                                          VLLM_INVALID_TOKEN_ID]
-            accepted_index = accepted_index[accepted_index !=
-                                            VLLM_INVALID_TOKEN_ID]
-            assert len(accepted_index) == hidden_states.shape[0] == len(
-                terminal_metadata)
-            index = accepted_index[:, None, None].expand(-1, 1,
-                                                         hs_size)  # b x 1 x d
-            second_last_token_hidden_states = hidden_states[:, -2]  # b x d
-            hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
-            # Store hidden states from target model for subsequent decode step
-            self.previous_hidden_states = HiddenStates(
-                hidden_states, terminal_metadata,
-                second_last_token_hidden_states)
-        return accepted_token_ids, logprobs
-
-    def _create_output_sampler_list(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
-        target_logprobs: torch.Tensor,  # shape: [batch_size, k+1, vocab_size]
-        prompt_logprobs: Optional[
-            torch.Tensor],  # shape: [nprompt_tokens, vocab_size]
-        k: int,
-        stage_times: Tuple[float, float, float],
-    ) -> List[SamplerOutput]:
-        """Given the accepted token ids, create a list of SamplerOutput.
-
-        The output is padded with -1 tokens such that each sequence has
-        the same number of outputs.
-        """
-        batch_size, num_steps = accepted_token_ids.shape
-        accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
-        if self._disable_logprobs:
-            # We are skipping the logprobs. Hence don't serialize the
-            # logprobs related tensors from the GPU. Instead create
-            # empty/dummy lists.
-            (accepted_token_id_ranks_by_step,
-            accepted_token_id_logprobs_by_step,
-            topk_logprobs_by_step, topk_indices_by_step) =\
-            self._create_dummy_logprob_lists(
-                batch_size, num_steps,
-                self.scorer_worker.model_config.max_logprobs)
-        else:
-            # Organize input tensors by step instead of by sequence.
-            target_logprobs_by_step = target_logprobs.transpose(0, 1)
-            # Serialize all tensors into Python lists.
-            (accepted_token_id_ranks_by_step,
-            accepted_token_id_logprobs_by_step,
-            topk_logprobs_by_step, topk_indices_by_step) =\
-                self._create_logprob_lists_from_tensors(
-                    target_logprobs_by_step, accepted_token_ids_by_step,
-                    self.scorer_worker.model_config.max_logprobs)
-
-        # Get the sequence ids and num_logprobs (sampling parameter) in the
-        # batch.
-        seq_ids, request_ids_seq_ids_mapping = get_all_seq_ids_and_request_ids(
-            seq_group_metadata_list)
-
-        num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
-
-        # Serialize tensor to CPU Python list.
-        accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
-
-        # Construct the output on a per-step, per-sequence basis.
-        # Non-terminal prefill chunks will end up here as rows with just -1s
-        # i.e mixed-batch [[-1, 1576], [-1, 29884], [-1, -1], [-1, -1]] while
-        # terminal chunks will only have one generated token at time 0.
-        sampler_output_list: List[SamplerOutput] = []
-
-        # Prefills are not multi-step (return at most 1 token), in order to
-        # avoid padding or repetition to fit decodes, we separate them.
-        for i, sg in enumerate(seq_group_metadata_list):
-            if not sg.is_prompt:
-                # Requests are ordered as prefills|decodes=>no more prefills.
-                break
-            num_logprobs = num_logprobs_per_seq[i]
-            seq_kwargs = dict(token_id=-1,
-                              token_id_logprob_rank=0,
-                              token_id_logprob=-float('inf'),
-                              topk_token_ids=[-1] * num_logprobs,
-                              topk_logprobs=[-float('inf')] * num_logprobs,
-                              seq_id=seq_ids[i])
-            # Terminal chunk, has token.
-            if sg.do_sample:
-                seq_kwargs.update(
-                    dict(
-                        token_id=accepted_token_ids[i][0].item(),
-                        token_id_logprob_rank=accepted_token_id_ranks_by_step[
-                            0][i],
-                        token_id_logprob=accepted_token_id_logprobs_by_step[0]
-                        [i],
-                        topk_token_ids=topk_indices_by_step[0][i]
-                        [:num_logprobs],
-                        # output only so step is 0
-                        topk_logprobs=topk_logprobs_by_step[0][i]
-                        [:num_logprobs],
-                    ))
-            needs_plogs = (sg.sampling_params.prompt_logprobs
-                           and sg.sampling_params.prompt_logprobs > 0)
-            plogs = None
-            if prompt_logprobs is not None:
-                # Even non-terminal prompt chunks can have logprobs here.
-                plogs = prompt_logprobs[i]
-            elif needs_plogs:
-                # Prompt logprobs are requested but `_disable_logprobs` is set.
-                seq_data = next(iter(sg.seq_data.values()))
-                # Get only the tokens in this chunk!
-                prompt_token_ids = seq_data.get_prompt_token_ids()
-                prompt_token_ids = prompt_token_ids[
-                    seq_data.
-                    _num_computed_tokens:seq_data._num_computed_tokens +
-                    sg.token_chunk_size]
-
-                is_first_chunk = seq_data._num_computed_tokens == 0
-                # There's no prob generated for the first token in a sequence.
-                if is_first_chunk:
-                    prompt_token_ids = prompt_token_ids[1:]
-                plogs = [
-                    create_logprobs_output(
-                        token_id=p_token_id,
-                        token_id_logprob_rank=-1,
-                        token_id_logprob=0.0,
-                        topk_token_ids=[],
-                        topk_logprobs=[],
-                    ) for p_token_id in prompt_token_ids
-                ]
-            seq_kwargs.update(dict(prompt_logprobs=plogs))
-
-            sampler_output_list.append(
-                SamplerOutput(
-                    outputs=[create_sequence_group_output(
-                        **seq_kwargs)]))  # type: ignore
-
-        # Decodes, create one SamplerOutput per-step (at most K+1).
-        for step_index in range(num_steps):
-            if all(token_id == -1 for sg, token_id in zip(
-                    seq_group_metadata_list,
-                    accepted_token_ids_by_step[step_index])
-                   if not sg.is_prompt):
-                break
-
-            step_output_token_ids: List[CompletionSequenceGroupOutput] = []
-            for sequence_index in range(batch_size):
-                seq_meta = seq_group_metadata_list[sequence_index]
-                # Prompts already processed above.
-                if seq_meta.is_prompt:
-                    continue
-
-                # Each sequence may have a different num_logprobs; retrieve it.
-                num_logprobs = num_logprobs_per_seq[sequence_index]
-                step_output_token_ids.append(
-                    create_sequence_group_output(
-                        token_id=accepted_token_ids_by_step[step_index]
-                        [sequence_index],
-                        token_id_logprob_rank=accepted_token_id_ranks_by_step[
-                            step_index][sequence_index],
-                        token_id_logprob=accepted_token_id_logprobs_by_step[
-                            step_index][sequence_index],
-                        seq_id=seq_ids[sequence_index],
-                        topk_token_ids=topk_indices_by_step[step_index]
-                        [sequence_index][:num_logprobs],
-                        topk_logprobs=topk_logprobs_by_step[step_index]
-                        [sequence_index][:num_logprobs],
-                        step_index=step_index))
-            sampler_output_list.append(
-                SamplerOutput(outputs=step_output_token_ids))
-
-        # Populate the data structures needed to keep track of sequences with
-        # bonus tokens.
-        self._track_sequences_with_bonus_tokens(seq_ids,
-                                                request_ids_seq_ids_mapping,
-                                                accepted_token_ids_by_step)
-        maybe_rejsample_metrics = (
-            self._metrics.maybe_collect_rejsample_metrics(k))
-        if maybe_rejsample_metrics is not None:
-            sampler_output_list[
-                0].spec_decode_worker_metrics = maybe_rejsample_metrics
-
-            # Log time spent in each stage periodically.
-            # This is periodic because the rejection sampler emits metrics
-            # periodically.
-            self._maybe_log_stage_times(*stage_times)
-        # First `n_prefills` entries will contain prefills SamplerOutput when
-        # chunked prefill is enabled, the rest is decodes in multi-step format.
-        return sampler_output_list
 
     def _maybe_log_stage_times(self, average_time_per_proposal_tok_ms: float,
                                scoring_time_ms: float,
